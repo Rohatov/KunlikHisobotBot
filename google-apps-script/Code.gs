@@ -1,36 +1,65 @@
 /**
- * Google Sheets ichidagi "Hisobotni yuborish" tugmasi uchun skript.
+ * Google Sheets ichidagi "Hisobotni yuborish" tugmasi/havolasi uchun skript.
  *
  * Bu Telegram botdagi /report buyrug'i bilan bir xil natijani beradi:
  * ikkita varaqni (Savdo, Qoldiq) PDF qilib, Telegram guruh/kanaliga yuboradi.
  * Python bot bilan hech qanday bog'lanish yo'q — bu mustaqil skript, chunki
- * Apps Script serverga to'g'ridan-to'g'ri ulana olmaydi (bu uchun serverda
- * ochiq HTTPS endpoint kerak bo'lardi). Shuning uchun eksport parametrlari
- * va fayl nomlash Python tomonidagi app/sheets_service.py va
- * app/pdf_service.py bilan qo'lda mos qilib qo'yilgan — ikkalasi ham bir xil
- * natija beradi.
+ * Apps Script serverga to'g'ridan-to'g'ri ulana olmaydi. Shuning uchun
+ * eksport parametrlari va fayl nomlash Python tomonidagi
+ * app/sheets_service.py va app/pdf_service.py bilan qo'lda mos qilib
+ * qo'yilgan — ikkalasi ham bir xil natija beradi.
  *
- * O'RNATISH:
- * 1. Extensions > Apps Script > Project Settings (⚙️) > Script Properties
- *    bo'limiga quyidagilarni qo'shing (.env fayldagi qiymatlar bilan bir xil):
- *      TELEGRAM_BOT_TOKEN
- *      TELEGRAM_CHAT_ID     (TELEGRAM_CHANNEL_ID qiymati, masalan -1001234567890)
- *      WORKSHEET_1_ID       (Savdo varag'ining sheetId/gid raqami)
- *      WORKSHEET_2_ID       (Qoldiq varag'ining sheetId/gid raqami)
- * 2. sendReportToTelegram funksiyasini bir marta "Run" qilib, ruxsat bering.
- * 3. Insert > Drawing orqali tugma yasab, unga "Assign script" orqali
- *    sendReportToTelegram funksiyasini biriktiring.
+ * IKKI XIL ISHLATISH USULI:
  *
- * To'liq qadamlar README.md faylida.
+ * A) Faqat tahrirlash (Editor) huquqi borlar uchun — Drawing + Assign script:
+ *    "sendReportToTelegram" funksiyasi jadval ichidagi chizmaga biriktiriladi.
+ *    KAMChilik: faqat Editor huquqi bor va shaxsan avtorizatsiyadan o'tgan
+ *    odam ishlata oladi — Viewer (faqat ko'ruvchi) buni ishga tushira olmaydi.
+ *
+ * B) Ko'ruvchilar (Viewer) ham foydalana oladigan usul — Web App:
+ *    "doGet" funksiyasi Web App sifatida deploy qilinadi (Execute as: Me,
+ *    Who has access: Anyone). Bu holda skript doim SIZNING (owner)
+ *    nomingizdan ishlaydi — hech kim alohida avtorizatsiyadan o'tmaydi,
+ *    shunchaki havolani (link) bosadi. Jadvalga rasm qo'yib, o'sha rasmga
+ *    ushbu Web App havolasini bog'lab qo'ying.
+ *
+ * To'liq qadamlar README.md faylida ("Hisobotni yuborish" bo'limi).
  */
 
+/** Editor jadval ichidan chizma (drawing) orqali ishga tushiradi. */
 function sendReportToTelegram() {
-  const ui = SpreadsheetApp.getUi();
+  const result = generateAndSendReport_();
+  SpreadsheetApp.getUi().alert(result.message);
+}
+
+/**
+ * Web App sifatida deploy qilinganda ishlaydi (Execute as: Me,
+ * Who has access: Anyone). Havolani bosgan har bir kishi uchun
+ * (Viewer bo'lsa ham) natija shu sahifada ko'rinadi.
+ */
+function doGet(e) {
+  const result = generateAndSendReport_();
+  const color = result.ok ? '#188038' : '#c5221f';
+  const title = result.ok ? "✅ Hisobot yuborildi" : '❌ Xatolik yuz berdi';
+  const safeMessage = result.message.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+  const html =
+    '<!DOCTYPE html><html><head><meta name="viewport" content="width=device-width, initial-scale=1">' +
+    '<style>body{font-family:sans-serif;text-align:center;padding-top:60px;background:#f5f5f5;margin:0}' +
+    'h2{color:' + color + '}' +
+    'pre{white-space:pre-wrap;text-align:left;display:inline-block;background:#fff;padding:16px 24px;' +
+    'border-radius:8px;box-shadow:0 1px 3px rgba(0,0,0,0.15)}</style></head>' +
+    '<body><h2>' + title + '</h2><pre>' + safeMessage + '</pre></body></html>';
+
+  return HtmlService.createHtmlOutput(html).setTitle('Hisobot');
+}
+
+/** Ikkala yo'l ham shu umumiy funksiyani chaqiradi — mantiq takrorlanmaydi. */
+function generateAndSendReport_() {
   const lock = LockService.getScriptLock();
 
   if (!lock.tryLock(5000)) {
-    ui.alert("⚠️ Hisobot allaqachon yuborilyapti. Birozdan so'ng qayta urinib ko'ring.");
-    return;
+    return { ok: false, message: "⚠️ Hisobot allaqachon yuborilyapti. Birozdan so'ng qayta urinib ko'ring." };
   }
 
   try {
@@ -41,13 +70,12 @@ function sendReportToTelegram() {
     const worksheet2Id = props.getProperty('WORKSHEET_2_ID');
 
     if (!botToken || !chatId || !worksheet1Id || !worksheet2Id) {
-      ui.alert(
-        "❌ Sozlamalar to'liq emas.\n" +
-        'Project Settings > Script Properties bo\'limida ' +
-        'TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WORKSHEET_1_ID, WORKSHEET_2_ID ' +
-        "borligini tekshiring."
-      );
-      return;
+      return {
+        ok: false,
+        message:
+          "Sozlamalar to'liq emas. Project Settings > Script Properties bo'limida " +
+          "TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WORKSHEET_1_ID, WORKSHEET_2_ID borligini tekshiring.",
+      };
     }
 
     const spreadsheetId = SpreadsheetApp.getActiveSpreadsheet().getId();
@@ -58,18 +86,20 @@ function sendReportToTelegram() {
       { sheetId: worksheet2Id, slug: 'qoldiq' },
     ];
 
-    const results = [];
+    const lines = [];
+    let allOk = true;
     for (const ws of worksheets) {
       try {
         const pdfBlob = exportSheetToPdf_(spreadsheetId, ws.sheetId, ws.slug, dateStr);
         sendDocumentToTelegram_(botToken, chatId, pdfBlob);
-        results.push('✅ ' + ws.slug + ": muvaffaqiyatli yuborildi");
+        lines.push('✅ ' + ws.slug + ': muvaffaqiyatli yuborildi');
       } catch (err) {
-        results.push('❌ ' + ws.slug + ': ' + err.message);
+        allOk = false;
+        lines.push('❌ ' + ws.slug + ': ' + err.message);
       }
     }
 
-    ui.alert(results.join('\n'));
+    return { ok: allOk, message: lines.join('\n') };
   } finally {
     lock.releaseLock();
   }

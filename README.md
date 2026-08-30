@@ -175,15 +175,27 @@ are available both via `journalctl` and in `logs/app.log` (with rotation).
 
 ## 9. "Hisobotni yuborish" button inside Google Sheets
 
-A Google Apps Script that duplicates `/report`'s behavior directly from a
-button drawn inside the spreadsheet is provided at
+A Google Apps Script that duplicates `/report`'s behavior directly from
+inside the spreadsheet is provided at
 [`google-apps-script/Code.gs`](google-apps-script/Code.gs). It exports the
 same two worksheets to `savdo_<date>.pdf` / `qoldiq_<date>.pdf` (no
 caption) and posts them straight to Telegram — independent of the Python
 bot process, since Apps Script cannot call into a server that has no
 public HTTPS endpoint.
 
-**Setup:**
+There are two ways to trigger it, and which one to use depends on who
+needs to click it:
+
+- **Drawing + "Assign script"** (`sendReportToTelegram`) — only works for
+  people with **Edit** access who individually authorize the script.
+  Viewers cannot run it at all; this is a hard Google limitation, not a
+  bug.
+- **Web App link** (`doGet`) — runs under the deploying owner's identity
+  for *everyone* who opens the link, including read-only Viewers, with no
+  per-user authorization prompt. **Use this one if anyone with view access
+  to the sheet should be able to trigger it.**
+
+### Setup (common steps)
 
 1. Open the spreadsheet → **Extensions → Apps Script**.
 2. Replace the contents of `Code.gs` with
@@ -194,17 +206,53 @@ public HTTPS endpoint.
    - `TELEGRAM_CHAT_ID` — same value as `.env`'s `TELEGRAM_CHANNEL_ID`
    - `WORKSHEET_1_ID` — same value as `.env`'s `WORKSHEET_1_ID`
    - `WORKSHEET_2_ID` — same value as `.env`'s `WORKSHEET_2_ID`
-4. Save, select `sendReportToTelegram` from the function dropdown, and
-   click **Run** once to grant the script permission to access the
-   spreadsheet and call external URLs.
-5. Back in the sheet: **Insert → Drawing**, add a text box/shape labeled
-   `📄 Hisobotni yuborish`, then **Save and Close**.
-6. Click the drawing once → the ⋮ menu in its corner → **Assign script**
-   → type `sendReportToTelegram` → OK.
+4. Save (Ctrl+S).
 
-Clicking the drawing now runs the same export-and-send flow as `/report`.
-Anyone with Edit access to the spreadsheet (or the Apps Script project)
-can see/trigger this, so restrict sheet editor access to people you trust.
+### Option A — Web App link (works for Viewers too, recommended)
+
+1. Click **Deploy → New deployment**.
+2. Click the ⚙️ next to "Select type" → **Web app**.
+3. Set **Execute as: Me** (your account) and **Who has access: Anyone**.
+4. Click **Deploy**, then **Authorize access** and grant permission — this
+   is a *one-time* consent from you as the owner; nobody else will ever
+   see an authorization prompt.
+5. Copy the generated URL (ends with `/exec`).
+6. Back in the sheet: **Insert → Image → Image over cells**, upload/pick
+   a "📄 Hisobotni yuborish" button-style image.
+7. Click the inserted image once → the link (🔗) icon that appears above
+   it → paste the `/exec` URL → **Apply**.
+
+Now anyone who can open the sheet (Viewer or Editor) can click the image;
+it opens the URL in a new tab, runs the export-and-send flow as you, and
+shows a simple "✅ Hisobot yuborildi" / "❌ Xatolik" confirmation page.
+
+> Since "Anyone" with the link can trigger sending, keep the `/exec` URL
+> itself only where the intended people can see it (e.g. only inside this
+> sheet). Use **"Anyone with Google account"** instead of **"Anyone"** in
+> step 3 if you want to require the clicker to at least be signed in.
+
+### Option B — Drawing + Assign script (Editors only)
+
+1. **Insert → Drawing**, add a text box/shape labeled
+   `📄 Hisobotni yuborish`, then **Save and Close**.
+2. Click the drawing once → the ⋮ menu in its corner → **Assign script**
+   → type `sendReportToTelegram` → OK.
+3. The first time each editor clicks it, Google shows an authorization
+   prompt they must accept ("Review permissions" → their account →
+   **Advanced** → "Go to ... (unsafe)" → **Allow**). If that dialog is
+   blocked by a popup blocker, the click will appear to hang/"load"
+   forever — allow popups for `script.google.com` and try again.
+
+### Why it got stuck "loading" for you
+
+Drawing-assigned functions run under the *clicking user's own*
+authorization. The first click for any account needs an interactive
+consent popup; if that popup is blocked, opened behind the window, or
+never completed, the sheet just shows a spinner indefinitely — this
+happens even for the file owner. It's also fundamentally unusable for
+Viewer-only accounts, since Google never lets a Viewer grant that consent
+at all. The Web App method (Option A) sidesteps both problems, since only
+you authorize once, at deploy time.
 
 ## 10. Troubleshooting
 
