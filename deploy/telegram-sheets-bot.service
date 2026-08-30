@@ -1,0 +1,35 @@
+[Unit]
+Description=Telegram Sheets Bot - daily Google Sheets PDF report bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Adjust these three paths/users for your server.
+User=USERNAME
+WorkingDirectory=/home/USERNAME/telegram-sheets-bot
+ExecStart=/home/USERNAME/telegram-sheets-bot/venv/bin/python -m app.main
+
+# Loads TELEGRAM_BOT_TOKEN, GOOGLE_SERVICE_ACCOUNT_FILE, etc. `python-dotenv`
+# also loads .env directly, but declaring it here too keeps systemd's own
+# view of the environment consistent (e.g. for `systemctl show`).
+EnvironmentFile=/home/USERNAME/telegram-sheets-bot/.env
+
+Restart=on-failure
+RestartSec=5
+
+# Hardening (safe defaults for a network-only, no-GUI service)
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only
+ReadWritePaths=/home/USERNAME/telegram-sheets-bot/logs
+
+# Logs also go to the systemd journal in addition to logs/app.log
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=telegram-sheets-bot
+
+[Install]
+WantedBy=multi-user.target

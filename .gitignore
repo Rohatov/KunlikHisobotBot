@@ -1,0 +1,16 @@
+.env
+secrets/
+*.key
+service-account.json
+__pycache__/
+*.pyc
+logs/
+
+# Virtual environments
+venv/
+.venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
