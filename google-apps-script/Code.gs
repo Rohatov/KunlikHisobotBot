@@ -26,7 +26,47 @@
  * To'liq qadamlar README.md faylida ("Hisobotni yuborish" bo'limi).
  */
 
-/** Editor jadval ichidan chizma (drawing) orqali ishga tushiradi. */
+/**
+ * Diagnostika: Script Properties'da aynan qanday kalitlar saqlanganini
+ * ko'rsatadi. Apps Script muharririda ushbu funksiyani tanlab "Run" bosing,
+ * so'ng chap paneldagi "Executions" (yoki View > Logs) bo'limini oching.
+ * Kalit nomlari aniq TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, WORKSHEET_1_ID,
+ * WORKSHEET_2_ID bilan mos kelishi kerak (katta-kichik harf va bo'shliqlar
+ * ham muhim — masalan "TELEGRAM_CHANNEL_ID" deb yozilgan bo'lsa,
+ * bu "TELEGRAM_CHAT_ID" bilan bir xil emas va topilmaydi).
+ */
+function debugProperties() {
+  const props = PropertiesService.getScriptProperties().getProperties();
+  Logger.log('Script Properties ichidagi barcha kalitlar: ' + JSON.stringify(Object.keys(props)));
+
+  ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WORKSHEET_1_ID', 'WORKSHEET_2_ID'].forEach(function (key) {
+    const value = props[key];
+    if (!value) {
+      Logger.log(key + " -> TOPILMADI (bo'sh yoki kalit nomi noto'g'ri)");
+    } else if (key === 'TELEGRAM_BOT_TOKEN') {
+      Logger.log(key + ' -> mavjud (uzunligi: ' + value.length + ' belgi)');
+    } else {
+      Logger.log(key + ' -> ' + value);
+    }
+  });
+}
+
+/**
+ * Jadval ochilganda yuqoridagi menyu qatoriga (Help yonidan) "📄 Hisobot"
+ * nomli maxsus menyu qo'shadi. DIQQAT: bu menyudagi elementni bosish ham
+ * "sendReportToTelegram" ni chaqiradi — ya'ni faqat Edit huquqi bor va
+ * shaxsan avtorizatsiyadan o'tgan odamlar uchun ishlaydi (Drawing bilan
+ * bir xil cheklov). Viewer'lar uchun baribir Web App havolasi (Option A,
+ * README) kerak bo'ladi.
+ */
+function onOpen() {
+  SpreadsheetApp.getUi()
+    .createMenu('📄 Hisobot')
+    .addItem('Hisobotni yuborish', 'sendReportToTelegram')
+    .addToUi();
+}
+
+/** Editor jadval ichidan chizma (drawing) yoki menyu orqali ishga tushiradi. */
 function sendReportToTelegram() {
   const result = generateAndSendReport_();
   SpreadsheetApp.getUi().alert(result.message);

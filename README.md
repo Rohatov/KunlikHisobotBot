@@ -217,13 +217,19 @@ needs to click it:
    is a *one-time* consent from you as the owner; nobody else will ever
    see an authorization prompt.
 5. Copy the generated URL (ends with `/exec`).
-6. Back in the sheet: **Insert → Image → Image over cells**, upload/pick
-   a "📄 Hisobotni yuborish" button-style image.
-7. Click the inserted image once → the link (🔗) icon that appears above
-   it → paste the `/exec` URL → **Apply**.
+6. Turn it into a clickable button, either way:
+   - **Text cell (simplest, no image needed):** click an empty cell, type
+     `📄 Hisobotni yuborish`, select it, press **Ctrl+K** (or **Insert →
+     Link**), paste the `/exec` URL, **Apply**. Optionally make it look
+     like a button: bold the text, set a background color and borders
+     (**Format → ...**), and widen the row/column.
+   - **Image:** **Insert → Image → Image over cells**, upload/pick an
+     icon, click the inserted image once → the link (🔗) icon above it →
+     paste the `/exec` URL → **Apply**.
 
-Now anyone who can open the sheet (Viewer or Editor) can click the image;
-it opens the URL in a new tab, runs the export-and-send flow as you, and
+Now anyone who can open the sheet (Viewer or Editor) can click it — Sheets
+shows a small preview card with the link, click through it once — which
+opens the URL in a new tab, runs the export-and-send flow as you, and
 shows a simple "✅ Hisobot yuborildi" / "❌ Xatolik" confirmation page.
 
 > Since "Anyone" with the link can trigger sending, keep the `/exec` URL
@@ -242,6 +248,20 @@ shows a simple "✅ Hisobot yuborildi" / "❌ Xatolik" confirmation page.
    **Advanced** → "Go to ... (unsafe)" → **Allow**). If that dialog is
    blocked by a popup blocker, the click will appear to hang/"load"
    forever — allow popups for `script.google.com` and try again.
+
+### Option C — Custom menu item (Editors only, same limitation as B)
+
+`Code.gs` also defines `onOpen()`, which adds a **📄 Hisobot** menu next to
+**Help** in the top menu bar, with a **Hisobotni yuborish** item that runs
+`sendReportToTelegram`. It appears automatically for anyone who opens the
+sheet — but clicking the item itself is a normal bound-script function
+call, not a plain hyperlink, so it hits the exact same wall as Option B:
+Google requires **Edit** access to run it at all, and Viewers get "You do
+not have permission to run this script." There is no way to make a Sheets
+menu item itself open an external URL, so **the top menu bar cannot host
+a Viewer-usable trigger** — only a hyperlink (cell or image, Option A) can,
+since following a link is a plain browser navigation that never asks
+Apps Script for authorization.
 
 ### Why it got stuck "loading" for you
 
@@ -286,6 +306,22 @@ is readable by the user running the service.
 This is the built-in execution lock — a scheduled or another manual run
 is already in progress. Wait for it to finish; the bot will not run two
 report generations concurrently.
+
+**Apps Script says "Sozlamalar to'liq emas" even though the Script
+Properties look correct**
+`PropertiesService.getScriptProperties()` matches key names exactly,
+including case and spaces — a property saved as `TELEGRAM_CHANNEL_ID`
+(matching `.env`'s name) will **not** be found, since the script looks up
+`TELEGRAM_CHAT_ID`. Run the `debugProperties` function from
+[`google-apps-script/Code.gs`](google-apps-script/Code.gs) (select it from
+the function dropdown in the Apps Script editor → **Run** → check
+**Executions**/**View → Logs**) — it prints every key it actually finds
+and flags any of the four required ones that are missing, so you can spot
+a typo immediately. Also remember: if you edit `Code.gs` **after**
+creating a Web App deployment, you must go to **Deploy → Manage
+deployments → ✏️ → New version → Deploy** for the `/exec` URL to run the
+updated code — editing Script Properties, though, takes effect immediately
+without redeploying.
 
 ## Project structure
 
