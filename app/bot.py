@@ -33,6 +33,7 @@ def build_application(config: Config, report_service: ReportService) -> Applicat
 
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("status", status_command))
+    application.add_handler(CommandHandler("report", report_command))
     application.add_handler(
         CallbackQueryHandler(manual_trigger_callback, pattern=f"^{MANUAL_TRIGGER_CALLBACK}$")
     )
@@ -65,14 +66,17 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📄 Send Daily Reports", callback_data=MANUAL_TRIGGER_CALLBACK)]]
+        [[InlineKeyboardButton("📄 Hisobotni yuborish", callback_data=MANUAL_TRIGGER_CALLBACK)]]
     )
     text = (
-        "🤖 *Daily Sheets Report Bot*\n\n"
-        "This bot exports two configured worksheets to PDF and posts them "
-        "to the report channel automatically every day at "
-        f"{config.schedule_hour:02d}:{config.schedule_minute:02d} ({config.timezone_name}).\n\n"
-        "Use the button below to trigger report generation manually."
+        "🤖 *Kunlik Hisobot Boti*\n\n"
+        "Ushbu bot Google jadvaldagi ikkita varaqni (Savdo va Qoldiq) har kuni "
+        f"soat {config.schedule_hour:02d}:{config.schedule_minute:02d} ({config.timezone_name}) da "
+        "PDF ko'rinishida hisobotlar kanaliga avtomatik yuboradi.\n\n"
+        "Hisobotni hoziroq yuborish uchun quyidagi tugmani bosing yoki /report buyrug'ini yuboring.\n\n"
+        "Buyruqlar:\n"
+        "/status — botning holatini ko'rish\n"
+        "/report — hisobotlarni qo'lda yuborish"
     )
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
@@ -85,54 +89,62 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     next_run = scheduler.next_run_time() if scheduler else None
     last_run = report_service.last_run
+    next_run_text = next_run.strftime("%d.%m.%Y %H:%M %Z") if next_run else "noma'lum"
 
     lines = [
-        "✅ Bot is running.",
-        f"🕐 Schedule: {config.schedule_hour:02d}:{config.schedule_minute:02d} ({config.timezone_name})",
-        f"⏭ Next run: {next_run.strftime('%d.%m.%Y %H:%M %Z') if next_run else 'unknown'}",
+        "✅ Bot ishlamoqda.",
+        f"🕐 Jadval: {config.schedule_hour:02d}:{config.schedule_minute:02d} ({config.timezone_name})",
+        f"⏭ Keyingi ishga tushish: {next_run_text}",
     ]
 
     if last_run is not None:
-        outcome = "✅ success" if last_run.success else "⚠️ completed with errors"
+        outcome = "✅ muvaffaqiyatli" if last_run.success else "⚠️ xatoliklar bilan yakunlandi"
         lines.append(
-            f"🕘 Last run: {last_run.finished_at.strftime('%d.%m.%Y %H:%M %Z')} "
-            f"— {outcome} (triggered by {last_run.triggered_by})"
+            f"🕘 Oxirgi ishga tushish: {last_run.finished_at.strftime('%d.%m.%Y %H:%M %Z')} "
+            f"— {outcome} (kim tomonidan: {last_run.triggered_by})"
         )
     else:
-        lines.append("🕘 Last run: none yet")
+        lines.append("🕘 Oxirgi ishga tushish: hali mavjud emas")
 
     await update.message.reply_text("\n".join(lines))
 
 
-@admin_only
-async def manual_trigger_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    await query.answer()
-
+async def _run_manual_report(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
     report_service: ReportService = context.bot_data["report_service"]
-    status_message = await query.message.reply_text("⏳ Generating and sending daily reports...")
-
-    result = await report_service.generate_and_send_reports(
-        context.bot, triggered_by=f"admin:{update.effective_user.id}"
+    status_message = await update.effective_message.reply_text(
+        "⏳ Hisobotlar tayyorlanmoqda va yuborilmoqda..."
     )
+
+    result = await report_service.generate_and_send_reports(context.bot, triggered_by=f"admin:{user_id}")
 
     if result.skipped_due_to_lock:
         await status_message.edit_text(
-            "⚠️ A report is already being generated. Please wait for it to finish."
+            "⚠️ Hisobot allaqachon tayyorlanmoqda. Iltimos, u tugashini kuting."
         )
         return
 
     lines = []
     for wr in result.worksheet_results:
         if wr.sent:
-            lines.append(f"✅ {wr.label}: sent successfully")
+            lines.append(f"✅ {wr.label}: muvaffaqiyatli yuborildi")
         elif wr.pdf_generated:
-            lines.append(f"⚠️ {wr.label}: PDF generated but sending failed")
+            lines.append(f"⚠️ {wr.label}: PDF tayyorlandi, lekin yuborishda xatolik")
         else:
-            lines.append(f"❌ {wr.label}: generation failed")
+            lines.append(f"❌ {wr.label}: tayyorlashda xatolik")
     summary = "\n".join(lines)
 
     if result.overall_success:
-        await status_message.edit_text(f"✅ Daily reports sent successfully.\n\n{summary}")
+        await status_message.edit_text(f"✅ Kunlik hisobotlar muvaffaqiyatli yuborildi.\n\n{summary}")
     else:
-        await status_message.edit_text(f"⚠️ Report generation finished with issues.\n\n{summary}")
+        await status_message.edit_text(f"⚠️ Hisobotlarni tayyorlashda muammo yuz berdi.\n\n{summary}")
+
+
+@admin_only
+async def manual_trigger_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()
+    await _run_manual_report(update, context, update.effective_user.id)
+
+
+@admin_only
+async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await _run_manual_report(update, context, update.effective_user.id)

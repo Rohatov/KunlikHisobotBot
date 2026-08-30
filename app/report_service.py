@@ -78,10 +78,9 @@ class ReportService:
         logger.info("Report generation started (triggered_by=%s)", triggered_by)
 
         result = ReportResult(started_at=started_at)
-        date_str = started_at.strftime("%d.%m.%Y")
 
-        for index, worksheet in enumerate(self._config.worksheets, start=1):
-            worksheet_result = await self._process_worksheet(bot, worksheet, index, date_str)
+        for worksheet in self._config.worksheets:
+            worksheet_result = await self._process_worksheet(bot, worksheet)
             result.worksheet_results.append(worksheet_result)
 
         result.finished_at = datetime.now(self._config.timezone)
@@ -102,9 +101,7 @@ class ReportService:
         )
         return result
 
-    async def _process_worksheet(
-        self, bot: Bot, worksheet: WorksheetConfig, index: int, date_str: str
-    ) -> WorksheetResult:
+    async def _process_worksheet(self, bot: Bot, worksheet: WorksheetConfig) -> WorksheetResult:
         wr = WorksheetResult(sheet_id=worksheet.sheet_id, label=worksheet.label)
         pdf_path: Optional[Path] = None
 
@@ -119,14 +116,12 @@ class ReportService:
             return wr
 
         try:
-            caption = self._build_caption(index, date_str)
             logger.info("Sending PDF to Telegram channel (%s)", worksheet.label)
             with open(pdf_path, "rb") as pdf_file:
                 await bot.send_document(
                     chat_id=self._config.telegram_channel_id,
                     document=pdf_file,
                     filename=pdf_path.name,
-                    caption=caption,
                 )
             wr.sent = True
             logger.info("%s sent successfully", worksheet.label)
@@ -140,9 +135,3 @@ class ReportService:
             await asyncio.to_thread(self._pdf_service.cleanup, pdf_path)
 
         return wr
-
-    @staticmethod
-    def _build_caption(index: int, date_str: str) -> str:
-        if index == 1:
-            return f"📄 Daily Report\n📅 Date: {date_str}"
-        return f"📄 Daily Report — Worksheet {index}\n📅 Date: {date_str}"

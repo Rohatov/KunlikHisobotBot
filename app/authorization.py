@@ -13,7 +13,7 @@ from app.config import Config
 
 logger = logging.getLogger(__name__)
 
-UNAUTHORIZED_MESSAGE = "⛔ You are not authorized to operate this bot."
+UNAUTHORIZED_MESSAGE = "⛔ Sizda ushbu botdan foydalanish huquqi yo'q."
 
 Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 

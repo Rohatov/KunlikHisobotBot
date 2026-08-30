@@ -36,7 +36,7 @@ class PDFService:
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
         date_str = datetime.now(self._config.timezone).strftime("%Y-%m-%d")
-        destination = self._tmp_dir / f"report_{slug}_{date_str}.pdf"
+        destination = self._tmp_dir / f"{slug}_{date_str}.pdf"
 
         pdf_bytes = self._sheets_service.export_worksheet_pdf(sheet_id)
 

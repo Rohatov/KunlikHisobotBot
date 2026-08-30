@@ -2,8 +2,8 @@
 
 A production-ready Telegram bot that exports two specific worksheets from a
 private Google Spreadsheet to PDF (preserving native Sheets formatting) and
-posts them to a Telegram channel — automatically every day at a configured
-time, and on demand via an admin-only button.
+posts them to a Telegram channel or group — automatically every day at a
+configured time, and on demand via an admin-only button or command.
 
 ## 1. What it does
 
@@ -16,24 +16,35 @@ Every day at a configured time (default `12:00 Asia/Tashkent`), the bot:
    reordering tabs never breaks it.
 3. Exports each worksheet to its own PDF using Google's native Sheets
    export, preserving fonts, borders, colors, merged cells, column widths
-   and row heights.
-4. Sends both PDFs as separate Telegram documents to the configured
-   channel.
+   and row heights. Files are named `savdo_<date>.pdf` and
+   `qoldiq_<date>.pdf` (e.g. `savdo_2026-08-30.pdf`), sent as plain
+   documents with no caption text underneath.
+4. Sends both PDFs as separate Telegram documents to the configured chat.
 
 An authorized administrator can trigger the exact same flow on demand with
-a `📄 Send Daily Reports` button, in addition to the daily schedule.
+a `📄 Hisobotni yuborish` button or the `/report` command, in addition to
+the daily schedule. All bot-facing text is in Uzbek.
+
+**Group chats work too:** `TELEGRAM_CHANNEL_ID` isn't limited to channels —
+it's just the destination chat ID for `bot.send_document`, which behaves
+identically for channels, supergroups, and basic groups. Add the bot to
+the group with permission to send messages/files, put the group's numeric
+ID (negative number, e.g. `-1001234567890` for a supergroup) in
+`TELEGRAM_CHANNEL_ID`, and no code changes are needed.
 
 ## 2. Features
 
 - Private Google Sheets support via a Service Account (Viewer access).
 - No OAuth flow, no browser, no interactive login required at runtime.
 - Worksheets identified by immutable `sheetId`, resilient to renames.
-- Two worksheets exported and sent as **separate** PDFs.
-- Delivery to a Telegram channel as documents (not photos), with captions.
+- Two worksheets exported and sent as **separate** PDFs (`savdo_<date>.pdf`,
+  `qoldiq_<date>.pdf`), no caption text.
+- Delivery to a Telegram channel or group as documents (not photos).
 - Daily scheduler (APScheduler) with configurable time and timezone.
-- Admin-only manual trigger button, with strict authorization checks.
+- Admin-only manual trigger — both a button and the `/report` command.
 - `/status` command showing schedule, last run, and next run.
 - Execution lock preventing overlapping report generations.
+- All bot-facing messages in Uzbek.
 - Structured logging to stdout (for `journalctl`) and rotating log files.
 - No secrets ever logged or exposed in Telegram messages.
 - Ready-to-use systemd service for continuous operation on Linux.
@@ -130,8 +141,18 @@ configured `sheetId` values exist, then starts polling Telegram and
 registers the daily scheduler job. Logs are written to `logs/app.log`
 and to stdout.
 
+### Bot commands (admin only)
+
+| Command    | Description (o'zbekcha)                                             |
+|------------|-----------------------------------------------------------------------|
+| `/start`   | Botni ishga tushirish, qisqacha ma'lumot va "Hisobotni yuborish" tugmasini ko'rsatadi |
+| `/status`  | Bot holati, jadval vaqti, oxirgi va keyingi ishga tushish vaqtini ko'rsatadi |
+| `/report`  | Ikkala hisobotni (Savdo, Qoldiq) darhol qo'lda yaratib, kanal/guruhga yuboradi (tugma bilan bir xil amal) |
+
 Send `/start` to the bot from the admin account to see the manual
-trigger button, or `/status` to check schedule/last-run info.
+trigger button, or run `/report` directly to send both PDFs immediately
+without opening the menu. Non-admin users get an "unauthorized" reply and
+the attempt is logged.
 
 ## 8. Systemd deployment
 
@@ -163,11 +184,12 @@ Service Account JSON, with at least Viewer access.
 Open each tab in a browser and re-check the `gid=` value in the URL.
 Tab names/positions are irrelevant — only the `gid` number matters.
 
-**Bot cannot send to the channel**
+**Bot cannot send to the channel/group**
 Make sure the bot account itself has been added to the channel as an
-**administrator** with "Post Messages" permission, and that
-`TELEGRAM_CHANNEL_ID` is the channel's numeric ID (usually starts with
-`-100`), not its `@username`.
+**administrator** with "Post Messages" permission (for a group, it just
+needs to be a member allowed to send messages/files — admin rights are
+not required), and that `TELEGRAM_CHANNEL_ID` is the numeric chat ID
+(usually starts with `-100` for channels/supergroups), not an `@username`.
 
 **Scheduler fires at the wrong time**
 Check `TIMEZONE` is a valid IANA name (e.g. `Asia/Tashkent`) and that
