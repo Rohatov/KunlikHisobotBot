@@ -173,7 +173,40 @@ journalctl -u telegram-sheets-bot -f
 The service restarts automatically on failure and starts on boot. Logs
 are available both via `journalctl` and in `logs/app.log` (with rotation).
 
-## 9. Troubleshooting
+## 9. "Hisobotni yuborish" button inside Google Sheets
+
+A Google Apps Script that duplicates `/report`'s behavior directly from a
+button drawn inside the spreadsheet is provided at
+[`google-apps-script/Code.gs`](google-apps-script/Code.gs). It exports the
+same two worksheets to `savdo_<date>.pdf` / `qoldiq_<date>.pdf` (no
+caption) and posts them straight to Telegram — independent of the Python
+bot process, since Apps Script cannot call into a server that has no
+public HTTPS endpoint.
+
+**Setup:**
+
+1. Open the spreadsheet → **Extensions → Apps Script**.
+2. Replace the contents of `Code.gs` with
+   [`google-apps-script/Code.gs`](google-apps-script/Code.gs) from this repo.
+3. In the Apps Script editor, open **Project Settings (⚙️) → Script
+   Properties** and add:
+   - `TELEGRAM_BOT_TOKEN` — same value as `.env`'s `TELEGRAM_BOT_TOKEN`
+   - `TELEGRAM_CHAT_ID` — same value as `.env`'s `TELEGRAM_CHANNEL_ID`
+   - `WORKSHEET_1_ID` — same value as `.env`'s `WORKSHEET_1_ID`
+   - `WORKSHEET_2_ID` — same value as `.env`'s `WORKSHEET_2_ID`
+4. Save, select `sendReportToTelegram` from the function dropdown, and
+   click **Run** once to grant the script permission to access the
+   spreadsheet and call external URLs.
+5. Back in the sheet: **Insert → Drawing**, add a text box/shape labeled
+   `📄 Hisobotni yuborish`, then **Save and Close**.
+6. Click the drawing once → the ⋮ menu in its corner → **Assign script**
+   → type `sendReportToTelegram` → OK.
+
+Clicking the drawing now runs the same export-and-send flow as `/report`.
+Anyone with Edit access to the spreadsheet (or the Apps Script project)
+can see/trigger this, so restrict sheet editor access to people you trust.
+
+## 10. Troubleshooting
 
 **Service Account cannot access the spreadsheet (`SheetsAccessError` /
 HTTP 403 at startup)**
@@ -224,6 +257,8 @@ telegram-sheets-bot/
 │   └── logging_config.py
 ├── deploy/
 │   └── telegram-sheets-bot.service
+├── google-apps-script/
+│   └── Code.gs             # optional in-sheet "Hisobotni yuborish" button
 ├── logs/
 ├── .env.example
 ├── .gitignore
