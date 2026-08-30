@@ -6,7 +6,7 @@ import logging
 from typing import Optional
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.constants import ParseMode
+from telegram.constants import ChatAction, ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from app.authorization import admin_only
@@ -17,6 +17,7 @@ from app.scheduler import ReportScheduler
 logger = logging.getLogger(__name__)
 
 MANUAL_TRIGGER_CALLBACK = "send_daily_reports"
+STATUS_CALLBACK = "show_status"
 
 
 def build_application(config: Config, report_service: ReportService) -> Application:
@@ -37,6 +38,7 @@ def build_application(config: Config, report_service: ReportService) -> Applicat
     application.add_handler(
         CallbackQueryHandler(manual_trigger_callback, pattern=f"^{MANUAL_TRIGGER_CALLBACK}$")
     )
+    application.add_handler(CallbackQueryHandler(status_callback, pattern=f"^{STATUS_CALLBACK}$"))
     application.add_error_handler(error_handler)
 
     return application
@@ -66,23 +68,22 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> N
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     config: Config = context.bot_data["config"]
     keyboard = InlineKeyboardMarkup(
-        [[InlineKeyboardButton("📄 Hisobotni yuborish", callback_data=MANUAL_TRIGGER_CALLBACK)]]
+        [
+            [InlineKeyboardButton("📄 Hisobotni yuborish", callback_data=MANUAL_TRIGGER_CALLBACK)],
+            [InlineKeyboardButton("ℹ️ Status", callback_data=STATUS_CALLBACK)],
+        ]
     )
     text = (
         "🤖 *Kunlik Hisobot Boti*\n\n"
         "Ushbu bot Google jadvaldagi ikkita varaqni (Savdo va Qoldiq) har kuni "
         f"soat {config.schedule_hour:02d}:{config.schedule_minute:02d} ({config.timezone_name}) da "
         "PDF ko'rinishida hisobotlar kanaliga avtomatik yuboradi.\n\n"
-        "Hisobotni hoziroq yuborish uchun quyidagi tugmani bosing yoki /report buyrug'ini yuboring.\n\n"
-        "Buyruqlar:\n"
-        "/status — botning holatini ko'rish\n"
-        "/report — hisobotlarni qo'lda yuborish"
+        "Quyidagi tugmalardan foydalaning."
     )
     await update.message.reply_text(text, reply_markup=keyboard, parse_mode=ParseMode.MARKDOWN)
 
 
-@admin_only
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+def _build_status_text(context: ContextTypes.DEFAULT_TYPE) -> str:
     config: Config = context.bot_data["config"]
     report_service: ReportService = context.bot_data["report_service"]
     scheduler: Optional[ReportScheduler] = context.bot_data.get("scheduler")
@@ -106,45 +107,60 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     else:
         lines.append("🕘 Oxirgi ishga tushish: hali mavjud emas")
 
-    await update.message.reply_text("\n".join(lines))
+    return "\n".join(lines)
 
 
-async def _run_manual_report(update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int) -> None:
+@admin_only
+async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.message.reply_text(_build_status_text(context))
+
+
+@admin_only
+async def status_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    await update.callback_query.answer()
+    await update.effective_message.reply_text(_build_status_text(context))
+
+
+async def _trigger_manual_report(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Runs the report flow silently: no "processing"/"success" chat messages.
+
+    Only problems (lock conflict, generation/delivery failure) are reported
+    back to the admin — the PDFs landing in the channel are confirmation
+    enough on the happy path. Full detail is always in the logs and in
+    /status's "last run" line.
+    """
     report_service: ReportService = context.bot_data["report_service"]
-    status_message = await update.effective_message.reply_text(
-        "⏳ Hisobotlar tayyorlanmoqda va yuborilmoqda..."
+    result = await report_service.generate_and_send_reports(
+        context.bot, triggered_by=f"admin:{update.effective_user.id}"
     )
 
-    result = await report_service.generate_and_send_reports(context.bot, triggered_by=f"admin:{user_id}")
-
     if result.skipped_due_to_lock:
-        await status_message.edit_text(
+        await update.effective_message.reply_text(
             "⚠️ Hisobot allaqachon tayyorlanmoqda. Iltimos, u tugashini kuting."
         )
         return
 
-    lines = []
-    for wr in result.worksheet_results:
-        if wr.sent:
-            lines.append(f"✅ {wr.label}: muvaffaqiyatli yuborildi")
-        elif wr.pdf_generated:
-            lines.append(f"⚠️ {wr.label}: PDF tayyorlandi, lekin yuborishda xatolik")
-        else:
-            lines.append(f"❌ {wr.label}: tayyorlashda xatolik")
-    summary = "\n".join(lines)
-
-    if result.overall_success:
-        await status_message.edit_text(f"✅ Kunlik hisobotlar muvaffaqiyatli yuborildi.\n\n{summary}")
-    else:
-        await status_message.edit_text(f"⚠️ Hisobotlarni tayyorlashda muammo yuz berdi.\n\n{summary}")
+    if not result.overall_success:
+        lines = []
+        for wr in result.worksheet_results:
+            if wr.sent:
+                continue
+            if wr.pdf_generated:
+                lines.append(f"⚠️ {wr.label}: PDF tayyorlandi, lekin yuborishda xatolik")
+            else:
+                lines.append(f"❌ {wr.label}: tayyorlashda xatolik")
+        await update.effective_message.reply_text(
+            "⚠️ Hisobotlarni tayyorlashda muammo yuz berdi.\n\n" + "\n".join(lines)
+        )
 
 
 @admin_only
 async def manual_trigger_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.callback_query.answer()
-    await _run_manual_report(update, context, update.effective_user.id)
+    await _trigger_manual_report(update, context)
 
 
 @admin_only
 async def report_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    await _run_manual_report(update, context, update.effective_user.id)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action=ChatAction.UPLOAD_DOCUMENT)
+    await _trigger_manual_report(update, context)

@@ -42,7 +42,10 @@ ID (negative number, e.g. `-1001234567890` for a supergroup) in
 - Delivery to a Telegram channel or group as documents (not photos).
 - Daily scheduler (APScheduler) with configurable time and timezone.
 - Admin-only manual trigger — both a button and the `/report` command.
-- `/status` command showing schedule, last run, and next run.
+- `/status` command **and** button showing schedule, last run, and next run.
+- Silent on success (no "sent successfully" chat spam) — the PDFs landing
+  in the channel are the confirmation; only failures are messaged to the
+  admin. Check `/status` any time to see the last run's outcome.
 - Execution lock preventing overlapping report generations.
 - All bot-facing messages in Uzbek.
 - Structured logging to stdout (for `journalctl`) and rotating log files.
@@ -145,14 +148,17 @@ and to stdout.
 
 | Command    | Description (o'zbekcha)                                             |
 |------------|-----------------------------------------------------------------------|
-| `/start`   | Botni ishga tushirish, qisqacha ma'lumot va "Hisobotni yuborish" tugmasini ko'rsatadi |
+| `/start`   | Botni ishga tushirish, "Hisobotni yuborish" va "Status" tugmalarini ko'rsatadi |
 | `/status`  | Bot holati, jadval vaqti, oxirgi va keyingi ishga tushish vaqtini ko'rsatadi |
 | `/report`  | Ikkala hisobotni (Savdo, Qoldiq) darhol qo'lda yaratib, kanal/guruhga yuboradi (tugma bilan bir xil amal) |
 
-Send `/start` to the bot from the admin account to see the manual
-trigger button, or run `/report` directly to send both PDFs immediately
-without opening the menu. Non-admin users get an "unauthorized" reply and
-the attempt is logged.
+`/start` shows both actions as buttons (📄 Hisobotni yuborish, ℹ️ Status),
+so the admin normally never needs to type `/status` or `/report` by hand.
+On a successful manual run, the bot sends **no** confirmation message —
+the PDFs appearing in the channel are the confirmation. It only messages
+the admin back if something went wrong (lock conflict, PDF generation, or
+delivery failure); check `/status` any time to see the last run's outcome.
+Non-admin users get an "unauthorized" reply and the attempt is logged.
 
 ## 8. Systemd deployment
 
