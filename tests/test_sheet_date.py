@@ -335,25 +335,70 @@ class PDFServiceFilenameTests(unittest.TestCase):
             service.cleanup(path)
 
 
-class ConfigDateCellTests(unittest.TestCase):
+class _ConfigTestBase(unittest.TestCase):
     BASE_ENV = {
-        "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHANNEL_ID": "-100", "ADMIN_TELEGRAM_ID": "1",
+        "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHANNEL_ID": "-100", "ADMIN1_ID": "1",
         "GOOGLE_SHEET_URL": "https://docs.google.com/spreadsheets/d/abc/edit",
         "WORKSHEET_1_ID": "1", "WORKSHEET_2_ID": "2",
     }
 
-    def _load(self, extra):
+    def _load(self, extra, drop=()):
         from app.config import load_config
 
         with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as f:
             f.write("{}")
             key_path = f.name
         env = {**self.BASE_ENV, "GOOGLE_SERVICE_ACCOUNT_FILE": key_path, **extra}
+        for name in drop:
+            env.pop(name, None)
         try:
             with patch.dict(os.environ, env, clear=True):
                 return load_config(env_file="/nonexistent/.env")
         finally:
             os.unlink(key_path)
+
+
+class ConfigAdminTests(_ConfigTestBase):
+    def test_numbered_admins_with_gaps(self):
+        cfg = self._load({"ADMIN1_ID": "111", "ADMIN2_ID": " 222 ", "ADMIN7_ID": "777"})
+        self.assertEqual(cfg.admin_telegram_ids, frozenset({111, 222, 777}))
+
+    def test_legacy_single_variable_still_works(self):
+        cfg = self._load({"ADMIN_TELEGRAM_ID": "555"}, drop=("ADMIN1_ID",))
+        self.assertEqual(cfg.admin_telegram_ids, frozenset({555}))
+
+    def test_legacy_and_numbered_are_merged_and_deduplicated(self):
+        cfg = self._load({"ADMIN_TELEGRAM_ID": "555", "ADMIN1_ID": "555", "ADMIN2_ID": "666"})
+        self.assertEqual(cfg.admin_telegram_ids, frozenset({555, 666}))
+
+    def test_blank_numbered_entries_are_ignored(self):
+        cfg = self._load({"ADMIN1_ID": "111", "ADMIN2_ID": "   "})
+        self.assertEqual(cfg.admin_telegram_ids, frozenset({111}))
+
+    def test_no_admin_is_a_config_error(self):
+        from app.exceptions import ConfigError
+
+        with self.assertRaises(ConfigError) as ctx:
+            self._load({"ADMIN1_ID": ""})
+        self.assertIn("ADMIN1_ID", str(ctx.exception))
+
+    def test_non_numeric_admin_names_the_variable(self):
+        from app.exceptions import ConfigError
+
+        with self.assertRaises(ConfigError) as ctx:
+            self._load({"ADMIN2_ID": "123,456"})
+        self.assertIn("ADMIN2_ID", str(ctx.exception))
+
+    def test_is_admin_accepts_every_configured_admin(self):
+        from app.authorization import is_admin
+
+        cfg = self._load({"ADMIN1_ID": "111", "ADMIN2_ID": "222"})
+        self.assertTrue(is_admin(111, cfg))
+        self.assertTrue(is_admin(222, cfg))
+        self.assertFalse(is_admin(333, cfg))
+
+
+class ConfigDateCellTests(_ConfigTestBase):
 
     def test_defaults_are_the_production_cells(self):
         cfg = self._load({})

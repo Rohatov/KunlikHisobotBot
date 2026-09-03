@@ -45,7 +45,7 @@ class WorksheetConfig:
 class Config:
     telegram_bot_token: str
     telegram_channel_id: int
-    admin_telegram_id: int
+    admin_telegram_ids: frozenset[int]
 
     google_sheet_url: str
     spreadsheet_id: str
@@ -80,6 +80,48 @@ def _require_int_env(name: str, description: str) -> int:
         return int(raw)
     except ValueError as exc:
         raise ConfigError(f"Environment variable '{name}' must be {description}, got '{raw}'.") from exc
+
+
+_ADMIN_ENV_PATTERN = re.compile(r"^ADMIN(\d+)_ID$")
+_LEGACY_ADMIN_ENV = "ADMIN_TELEGRAM_ID"
+
+
+def _load_admin_ids() -> frozenset[int]:
+    """Collect every admin Telegram user ID from the environment.
+
+    Admins are listed one per variable, ``ADMIN1_ID``, ``ADMIN2_ID``, ...
+    (any numbering, gaps allowed), so adding an admin is just adding a
+    line to ``.env``. The original single ``ADMIN_TELEGRAM_ID`` is still
+    honoured so existing deployments keep working. At least one admin is
+    required.
+    """
+    sources: list[tuple[str, str]] = []
+    legacy = os.getenv(_LEGACY_ADMIN_ENV)
+    if legacy is not None and legacy.strip():
+        sources.append((_LEGACY_ADMIN_ENV, legacy))
+
+    numbered = []
+    for name, value in os.environ.items():
+        match = _ADMIN_ENV_PATTERN.match(name)
+        if match and value.strip():
+            numbered.append((int(match.group(1)), name, value))
+    sources.extend((name, value) for _, name, value in sorted(numbered))
+
+    if not sources:
+        raise ConfigError(
+            "No admin configured. Add at least one admin Telegram user ID to your "
+            ".env as ADMIN1_ID=<numeric id> (add ADMIN2_ID, ADMIN3_ID, ... for more)."
+        )
+
+    admin_ids: set[int] = set()
+    for name, raw in sources:
+        try:
+            admin_ids.add(int(raw.strip()))
+        except ValueError as exc:
+            raise ConfigError(
+                f"Environment variable '{name}' must be a numeric Telegram user ID, got '{raw.strip()}'."
+            ) from exc
+    return frozenset(admin_ids)
 
 
 def _extract_spreadsheet_id(url: str) -> str:
@@ -152,9 +194,7 @@ def load_config(env_file: str | None = None) -> Config:
     telegram_channel_id = _require_int_env(
         "TELEGRAM_CHANNEL_ID", "an integer channel ID (e.g. -1001234567890)"
     )
-    admin_telegram_id = _require_int_env(
-        "ADMIN_TELEGRAM_ID", "a numeric Telegram user ID"
-    )
+    admin_telegram_ids = _load_admin_ids()
 
     google_sheet_url = _require_env("GOOGLE_SHEET_URL")
     spreadsheet_id = _extract_spreadsheet_id(google_sheet_url)
@@ -185,7 +225,7 @@ def load_config(env_file: str | None = None) -> Config:
     return Config(
         telegram_bot_token=telegram_bot_token,
         telegram_channel_id=telegram_channel_id,
-        admin_telegram_id=admin_telegram_id,
+        admin_telegram_ids=admin_telegram_ids,
         google_sheet_url=google_sheet_url,
         spreadsheet_id=spreadsheet_id,
         google_service_account_file=service_account_file,

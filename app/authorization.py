@@ -19,11 +19,11 @@ Handler = Callable[[Update, ContextTypes.DEFAULT_TYPE], Awaitable[None]]
 
 
 def is_admin(user_id: int, config: Config) -> bool:
-    return user_id == config.admin_telegram_id
+    return user_id in config.admin_telegram_ids
 
 
 def admin_only(handler: Handler) -> Handler:
-    """Decorator that rejects any user who is not the configured admin.
+    """Decorator that rejects any user who is not one of the configured admins.
 
     Handles both plain messages and callback-query-triggered handlers.
     Unauthorized attempts are logged (user id only, no sensitive payload).

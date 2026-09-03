@@ -25,9 +25,9 @@ Every day at a configured time (default `12:00 Asia/Tashkent`), the bot:
    Today's date is used only if no date can be found in the worksheet.
 4. Sends both PDFs as separate Telegram documents to the configured chat.
 
-An authorized administrator can trigger the exact same flow on demand with
-a `📄 Hisobotni yuborish` button or the `/report` command, in addition to
-the daily schedule. All bot-facing text is in Uzbek.
+Any of the configured administrators can trigger the exact same flow on
+demand with a `📄 Hisobotni yuborish` button or the `/report` command, in
+addition to the daily schedule. All bot-facing text is in Uzbek.
 
 **Group chats work too:** `TELEGRAM_CHANNEL_ID` isn't limited to channels —
 it's just the destination chat ID for `bot.send_document`, which behaves
@@ -47,6 +47,7 @@ ID (negative number, e.g. `-1001234567890` for a supergroup) in
 - Delivery to a Telegram channel or group as documents (not photos).
 - Daily scheduler (APScheduler) with configurable time and timezone.
 - Admin-only manual trigger — both a button and the `/report` command.
+  Any number of admins, one `ADMINn_ID` line each in `.env`.
 - `/status` command **and** button showing schedule, last run, and next run.
 - Silent on success (no "sent successfully" chat spam) — the PDFs landing
   in the channel are the confirmation; only failures are messaged to the
@@ -108,7 +109,10 @@ Edit `.env` (see [`.env.example`](.env.example) for the full template):
 # Telegram
 TELEGRAM_BOT_TOKEN=your_telegram_bot_token
 TELEGRAM_CHANNEL_ID=-1001234567890
-ADMIN_TELEGRAM_ID=123456789
+
+# Admins: one line per admin, numbered ADMIN1_ID, ADMIN2_ID, ADMIN3_ID, ...
+ADMIN1_ID=123456789
+ADMIN2_ID=987654321
 
 # Google Sheets
 GOOGLE_SHEET_URL=https://docs.google.com/spreadsheets/d/SPREADSHEET_ID/edit
@@ -160,8 +164,18 @@ the current year. Each run logs which cell was chosen, e.g.
 If no date is found (logged as a warning), today's date is used so the
 report is still delivered.
 
+**Admins (`ADMINn_ID`):** every Telegram user allowed to use `/status`,
+`/report` and the buttons is listed as its own numbered variable —
+`ADMIN1_ID`, `ADMIN2_ID`, `ADMIN3_ID`, ... The numbering only needs to be
+unique, gaps are fine, and blank entries are ignored. To add an admin, add
+one more `ADMIN<n>_ID=<numeric id>` line and restart the bot; to remove
+one, delete their line. At least one admin is required. The original
+single `ADMIN_TELEGRAM_ID` variable still works and is merged with the
+numbered ones, so existing deployments need no change. Everyone else gets
+the "⛔ Sizda ushbu botdan foydalanish huquqi yo'q." reply.
+
 **Finding your Telegram IDs:** message
-[@userinfobot](https://t.me/userinfobot) for your own `ADMIN_TELEGRAM_ID`;
+[@userinfobot](https://t.me/userinfobot) for each admin's `ADMINn_ID`;
 for `TELEGRAM_CHANNEL_ID`, add the bot as admin to the channel and forward
 a channel message to [@userinfobot](https://t.me/userinfobot), or check
 `getUpdates` on the Bot API after posting in the channel.
@@ -181,7 +195,7 @@ configured `sheetId` values exist, then starts polling Telegram and
 registers the daily scheduler job. Logs are written to `logs/app.log`
 and to stdout.
 
-### Bot commands (admin only)
+### Bot commands (admins only)
 
 | Command    | Description (o'zbekcha)                                             |
 |------------|-----------------------------------------------------------------------|
