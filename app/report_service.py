@@ -107,7 +107,10 @@ class ReportService:
 
         try:
             pdf_path = await asyncio.to_thread(
-                self._pdf_service.generate_worksheet_pdf, worksheet.sheet_id, worksheet.slug
+                self._pdf_service.generate_worksheet_pdf,
+                worksheet.sheet_id,
+                worksheet.slug,
+                worksheet.date_cell,
             )
             wr.pdf_generated = True
         except Exception as exc:  # noqa: BLE001 - convert to safe, logged result

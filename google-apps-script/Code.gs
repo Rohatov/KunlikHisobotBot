@@ -39,9 +39,11 @@ function debugProperties() {
   const props = PropertiesService.getScriptProperties().getProperties();
   Logger.log('Script Properties ichidagi barcha kalitlar: ' + JSON.stringify(Object.keys(props)));
 
-  ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WORKSHEET_1_ID', 'WORKSHEET_2_ID'].forEach(function (key) {
+  ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WORKSHEET_1_ID', 'WORKSHEET_2_ID', 'WORKSHEET_1_DATE_CELL', 'WORKSHEET_2_DATE_CELL'].forEach(function (key) {
     const value = props[key];
-    if (!value) {
+    if (!value && key.indexOf('_DATE_CELL') !== -1) {
+      Logger.log(key + " -> bo'sh (ixtiyoriy: sana avtomatik topiladi)");
+    } else if (!value) {
       Logger.log(key + " -> TOPILMADI (bo'sh yoki kalit nomi noto'g'ri)");
     } else if (key === 'TELEGRAM_BOT_TOKEN') {
       Logger.log(key + ' -> mavjud (uzunligi: ' + value.length + ' belgi)');
@@ -108,6 +110,10 @@ function generateAndSendReport_() {
     const chatId = props.getProperty('TELEGRAM_CHAT_ID');
     const worksheet1Id = props.getProperty('WORKSHEET_1_ID');
     const worksheet2Id = props.getProperty('WORKSHEET_2_ID');
+    // Ixtiyoriy: hisobot sanasi turgan katak (masalan "B2"). Bo'sh bo'lsa,
+    // varaqning yuqori-chap A1:Z40 qismidan birinchi sana avtomatik topiladi.
+    const worksheet1DateCell = props.getProperty('WORKSHEET_1_DATE_CELL');
+    const worksheet2DateCell = props.getProperty('WORKSHEET_2_DATE_CELL');
 
     if (!botToken || !chatId || !worksheet1Id || !worksheet2Id) {
       return {
@@ -118,18 +124,22 @@ function generateAndSendReport_() {
       };
     }
 
-    const spreadsheetId = SpreadsheetApp.getActiveSpreadsheet().getId();
-    const dateStr = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), 'yyyy-MM-dd');
+    const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+    const spreadsheetId = spreadsheet.getId();
 
     const worksheets = [
-      { sheetId: worksheet1Id, slug: 'savdo' },
-      { sheetId: worksheet2Id, slug: 'qoldiq' },
+      { sheetId: worksheet1Id, slug: 'savdo', dateCell: worksheet1DateCell },
+      { sheetId: worksheet2Id, slug: 'qoldiq', dateCell: worksheet2DateCell },
     ];
 
     const lines = [];
     let allOk = true;
     for (const ws of worksheets) {
       try {
+        // Fayl nomidagi sana yuborilgan kun emas, varaq ICHIDA yozilgan
+        // hisobot sanasi bo'lishi kerak (1-sentyabr hisoboti 3-sentyabrda
+        // yuborilsa ham "savdo_2026-09-01.pdf"). Sana topilmasa bugungi kun.
+        const dateStr = resolveReportDateString_(spreadsheet, ws.sheetId, ws.dateCell);
         const pdfBlob = exportSheetToPdf_(spreadsheetId, ws.sheetId, ws.slug, dateStr);
         sendDocumentToTelegram_(botToken, chatId, pdfBlob);
         lines.push('✅ ' + ws.slug + ': muvaffaqiyatli yuborildi');
@@ -143,6 +153,168 @@ function generateAndSendReport_() {
   } finally {
     lock.releaseLock();
   }
+}
+
+/**
+ * Varaq ichidagi hisobot sanasini 'yyyy-MM-dd' ko'rinishida qaytaradi.
+ * dateCell berilgan bo'lsa faqat o'sha katak o'qiladi; aks holda A1:Z40
+ * oralig'i qatorma-qator (chapdan o'ngga) skanerlanib, birinchi sana
+ * ko'rinishidagi katak olinadi. Python tomonidagi app/sheet_date.py bilan
+ * bir xil qoidalar. Sana topilmasa bugungi kun qaytariladi.
+ */
+function resolveReportDateString_(spreadsheet, sheetId, dateCell) {
+  const tz = spreadsheet.getSpreadsheetTimeZone();
+  const today = new Date();
+  const defaultYear = Number(Utilities.formatDate(today, tz, 'yyyy'));
+
+  const sheet = spreadsheet.getSheets().find(function (s) {
+    return String(s.getSheetId()) === String(sheetId);
+  });
+  if (!sheet) {
+    return Utilities.formatDate(today, tz, 'yyyy-MM-dd');
+  }
+
+  let found = null;
+  if (dateCell && String(dateCell).trim()) {
+    found = dateFromCellValue_(sheet.getRange(String(dateCell).trim()).getValue(), defaultYear);
+  } else {
+    const rows = Math.min(40, Math.max(sheet.getLastRow(), 1));
+    const cols = Math.min(26, Math.max(sheet.getLastColumn(), 1));
+    const values = sheet.getRange(1, 1, rows, cols).getValues();
+    outer: for (let r = 0; r < values.length; r++) {
+      for (let c = 0; c < values[r].length; c++) {
+        found = dateFromCellValue_(values[r][c], defaultYear);
+        if (found) break outer;
+      }
+    }
+  }
+
+  if (!found) {
+    Logger.log('Varaq ' + sheetId + ' ichida sana topilmadi, bugungi kun ishlatiladi');
+    return Utilities.formatDate(today, tz, 'yyyy-MM-dd');
+  }
+  // Katakdan kelgan Date obyekti jadval vaqt mintaqasida; matndan yasalgani
+  // esa "mahalliy" komponentlar bilan yaratilgan — ikkalasi ham shu yerda
+  // sana komponentlaridan to'g'ridan-to'g'ri formatlanadi.
+  return found.y + '-' + pad2_(found.m) + '-' + pad2_(found.d);
+}
+
+/** Katak qiymatini {y, m, d} ga aylantiradi; sana bo'lmasa null. */
+function dateFromCellValue_(value, defaultYear) {
+  if (value instanceof Date && !isNaN(value.getTime())) {
+    const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
+    return {
+      y: Number(Utilities.formatDate(value, tz, 'yyyy')),
+      m: Number(Utilities.formatDate(value, tz, 'M')),
+      d: Number(Utilities.formatDate(value, tz, 'd')),
+    };
+  }
+  if (typeof value === 'string' && value.trim()) {
+    return parseDateText_(value, defaultYear);
+  }
+  return null;
+}
+
+const MONTH_PATTERNS_ = [
+  [1, 'yanvar|январ[ья]?|jan(?:uary)?'],
+  [2, 'fevral|феврал[ья]?|feb(?:ruary)?'],
+  [3, 'mart|март[а]?|mar(?:ch)?'],
+  [4, 'aprel|апрел[ья]?|apr(?:il)?'],
+  [5, 'may|ма[йя]'],
+  [6, 'iyun|июн[ья]?|jun(?:e)?'],
+  [7, 'iyul|июл[ья]?|jul(?:y)?'],
+  [8, 'avgust|август[а]?|aug(?:ust)?'],
+  [9, 'sentyabr|sentabr|сентябр[ья]?|sep(?:t(?:ember)?)?'],
+  [10, 'oktyabr|oktabr|октябр[ья]?|oct(?:ober)?'],
+  [11, 'noyabr|ноябр[ья]?|nov(?:ember)?'],
+  [12, 'dekabr|декабр[ья]?|dec(?:ember)?'],
+];
+// JS'da \b kirill harflari bilan ishlamaydi, shuning uchun so'z chegarasi
+// "harf emas" sifatida qo'lda tekshiriladi.
+const LETTER_ = '[A-Za-zЀ-ӿʻ‘’\']';
+const MONTH_ALT_ = MONTH_PATTERNS_.map(function (p) { return '(' + p[1] + ')'; }).join('|');
+
+const NUMERIC_YMD_ = /(?:^|\D)(\d{4})[./-](\d{1,2})[./-](\d{1,2})(?!\d)/;
+const NUMERIC_DMY_ = /(?:^|\D)(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})(?!\d)/;
+const DAY_MONTH_ = new RegExp(
+  '(?:^|\\D)(\\d{1,2})\\s*[-–—]?\\s*(?:' + MONTH_ALT_ + ')(?!' + LETTER_ + ')\\.?(?:\\s*[-,]?\\s*(\\d{4}))?',
+  'i'
+);
+const MONTH_DAY_ = new RegExp(
+  '(?:^|[^A-Za-zЀ-ӿ])(?:' + MONTH_ALT_ + ')(?!' + LETTER_ + ')\\.?\\s*(\\d{1,2})(?!\\d)(?:\\s*[-,]?\\s*(\\d{4}))?',
+  'i'
+);
+
+/** "Sana: 01.09.2026", "1-sentyabr", "2 сентября 2026" kabi matndan sanani topadi. */
+function parseDateText_(text, defaultYear) {
+  const s = String(text).trim();
+  let m;
+
+  m = NUMERIC_YMD_.exec(s);
+  if (m) {
+    const r = safeDate_(Number(m[1]), Number(m[2]), Number(m[3]));
+    if (r) return r;
+  }
+  m = NUMERIC_DMY_.exec(s);
+  if (m) {
+    const r = safeDate_(Number(m[3]), Number(m[2]), Number(m[1]));
+    if (r) return r;
+  }
+
+  m = DAY_MONTH_.exec(s);
+  if (m) {
+    const month = monthFromGroups_(m, 2);
+    const year = m[2 + MONTH_PATTERNS_.length] ? Number(m[2 + MONTH_PATTERNS_.length]) : defaultYear;
+    const r = month && safeDate_(year, month, Number(m[1]));
+    if (r) return r;
+  }
+  m = MONTH_DAY_.exec(s);
+  if (m) {
+    const month = monthFromGroups_(m, 1);
+    const day = Number(m[1 + MONTH_PATTERNS_.length]);
+    const year = m[2 + MONTH_PATTERNS_.length] ? Number(m[2 + MONTH_PATTERNS_.length]) : defaultYear;
+    const r = month && safeDate_(year, month, day);
+    if (r) return r;
+  }
+  return null;
+}
+
+function monthFromGroups_(match, offset) {
+  for (let i = 0; i < MONTH_PATTERNS_.length; i++) {
+    if (match[offset + i]) return MONTH_PATTERNS_[i][0];
+  }
+  return null;
+}
+
+function safeDate_(y, m, d) {
+  if (y < 100) y += 2000;
+  if (m < 1 || m > 12 || d < 1 || d > 31) return null;
+  const probe = new Date(Date.UTC(y, m - 1, d));
+  if (probe.getUTCFullYear() !== y || probe.getUTCMonth() !== m - 1 || probe.getUTCDate() !== d) {
+    return null; // masalan 31.02
+  }
+  return { y: y, m: m, d: d };
+}
+
+function pad2_(n) {
+  return (n < 10 ? '0' : '') + n;
+}
+
+/**
+ * Sinov: Apps Script muharririda ushbu funksiyani "Run" qilib, Executions /
+ * Logs bo'limida har bir varaq uchun qaysi sana topilganini ko'ring.
+ * Telegramga hech narsa yuborilmaydi.
+ */
+function debugReportDates() {
+  const props = PropertiesService.getScriptProperties();
+  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
+  [
+    ['savdo', props.getProperty('WORKSHEET_1_ID'), props.getProperty('WORKSHEET_1_DATE_CELL')],
+    ['qoldiq', props.getProperty('WORKSHEET_2_ID'), props.getProperty('WORKSHEET_2_DATE_CELL')],
+  ].forEach(function (row) {
+    const dateStr = resolveReportDateString_(spreadsheet, row[1], row[2]);
+    Logger.log(row[0] + ' (sheetId=' + row[1] + ', katak=' + (row[2] || 'avto') + ') -> ' + row[0] + '_' + dateStr + '.pdf');
+  });
 }
 
 /** Bitta varaqni (gid orqali) PDF sifatida eksport qiladi. */

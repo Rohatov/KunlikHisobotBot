@@ -13,6 +13,7 @@ import os
 import tempfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 from app.config import Config
 from app.sheets_service import SheetsService
@@ -26,8 +27,16 @@ class PDFService:
         self._config = config
         self._tmp_dir = Path(tempfile.gettempdir()) / "telegram-sheets-bot"
 
-    def generate_worksheet_pdf(self, sheet_id: int, slug: str) -> Path:
+    def generate_worksheet_pdf(
+        self, sheet_id: int, slug: str, date_cell: Optional[str] = None
+    ) -> Path:
         """Export the given worksheet and write it to a uniquely named PDF.
+
+        The filename carries the report date written *inside* the
+        worksheet (``<slug>_<YYYY-MM-DD>.pdf``), read from ``date_cell`` or
+        auto-detected — not the day the export runs, since a report is
+        often sent a day or two after its business date. Today's date is
+        used only when no date can be found in the worksheet.
 
         Returns the path to the finished file. Writes go through a
         randomly-named temp file in the same directory and an atomic
@@ -35,7 +44,10 @@ class PDFService:
         """
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        date_str = datetime.now(self._config.timezone).strftime("%Y-%m-%d")
+        report_date = self._sheets_service.get_worksheet_date(sheet_id, date_cell)
+        if report_date is None:
+            report_date = datetime.now(self._config.timezone).date()
+        date_str = report_date.strftime("%Y-%m-%d")
         destination = self._tmp_dir / f"{slug}_{date_str}.pdf"
 
         pdf_bytes = self._sheets_service.export_worksheet_pdf(sheet_id)

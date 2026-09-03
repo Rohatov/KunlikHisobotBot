@@ -13,11 +13,13 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from dotenv import load_dotenv
 
 from app.exceptions import ConfigError
+from app.sheet_date import parse_a1_cell
 
 _SPREADSHEET_ID_PATTERN = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 
@@ -26,11 +28,17 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 @dataclass(frozen=True)
 class WorksheetConfig:
-    """A single worksheet identified by its Google `sheetId` (gid)."""
+    """A single worksheet identified by its Google `sheetId` (gid).
+
+    ``date_cell`` is an optional A1 reference (e.g. ``"B2"``) of the cell
+    holding the report's date. When None, the top-left region of the
+    worksheet is scanned for the first date-like cell instead.
+    """
 
     sheet_id: int
     slug: str
     label: str
+    date_cell: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -96,6 +104,22 @@ def _validate_service_account_file(raw_path: str) -> Path:
     return path
 
 
+def _optional_date_cell_env(name: str) -> Optional[str]:
+    """Read an optional A1 cell reference; blank means "auto-detect"."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return None
+    cell = raw.strip().replace("$", "").upper()
+    try:
+        parse_a1_cell(cell)
+    except ValueError as exc:
+        raise ConfigError(
+            f"Environment variable '{name}' must be a single-cell A1 reference "
+            f"such as 'B2' (or left empty to auto-detect the date), got '{raw}'."
+        ) from exc
+    return cell
+
+
 def _validate_timezone(name: str) -> ZoneInfo:
     try:
         return ZoneInfo(name)
@@ -135,6 +159,8 @@ def load_config(env_file: str | None = None) -> Config:
         raise ConfigError(
             "WORKSHEET_1_ID and WORKSHEET_2_ID must refer to two different worksheets."
         )
+    worksheet_1_date_cell = _optional_date_cell_env("WORKSHEET_1_DATE_CELL")
+    worksheet_2_date_cell = _optional_date_cell_env("WORKSHEET_2_DATE_CELL")
 
     timezone_name = os.getenv("TIMEZONE", "Asia/Tashkent").strip() or "Asia/Tashkent"
     timezone = _validate_timezone(timezone_name)
@@ -153,8 +179,12 @@ def load_config(env_file: str | None = None) -> Config:
         google_sheet_url=google_sheet_url,
         spreadsheet_id=spreadsheet_id,
         google_service_account_file=service_account_file,
-        worksheet_1=WorksheetConfig(sheet_id=worksheet_1_id, slug="savdo", label="Savdo"),
-        worksheet_2=WorksheetConfig(sheet_id=worksheet_2_id, slug="qoldiq", label="Qoldiq"),
+        worksheet_1=WorksheetConfig(
+            sheet_id=worksheet_1_id, slug="savdo", label="Savdo", date_cell=worksheet_1_date_cell
+        ),
+        worksheet_2=WorksheetConfig(
+            sheet_id=worksheet_2_id, slug="qoldiq", label="Qoldiq", date_cell=worksheet_2_date_cell
+        ),
         timezone_name=timezone_name,
         timezone=timezone,
         schedule_hour=schedule_hour,

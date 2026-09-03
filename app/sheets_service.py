@@ -30,7 +30,8 @@ far better than re-building the sheet from raw cell data.
 from __future__ import annotations
 
 import logging
-from typing import Iterable
+from datetime import date, datetime
+from typing import Iterable, Optional
 
 from google.auth.transport.requests import AuthorizedSession
 from google.oauth2 import service_account
@@ -40,6 +41,12 @@ from requests.exceptions import RequestException
 
 from app.config import Config
 from app.exceptions import PDFExportError, SheetsAccessError, WorksheetNotFoundError
+from app.sheet_date import (
+    DEFAULT_SCAN_COLUMNS,
+    DEFAULT_SCAN_ROWS,
+    find_date_in_grid,
+    parse_a1_cell,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -138,6 +145,72 @@ class SheetsService:
             )
         logger.info("Verified %d configured worksheet(s) exist in the spreadsheet", len(list(sheet_ids)))
 
+    def get_worksheet_date(self, sheet_id: int, date_cell: Optional[str] = None) -> Optional[date]:
+        """Read the report date written inside a worksheet.
+
+        With ``date_cell`` (A1 notation) only that cell is read; otherwise
+        the top-left ``DEFAULT_SCAN_ROWS`` x ``DEFAULT_SCAN_COLUMNS`` block
+        is scanned in reading order for the first date-like cell. Returns
+        None — never raises — when no date can be determined, so a missing
+        or unreadable date degrades to a fallback filename rather than
+        blocking the whole report.
+        """
+        if date_cell:
+            row, column = parse_a1_cell(date_cell)
+            grid_range = {
+                "sheetId": sheet_id,
+                "startRowIndex": row,
+                "endRowIndex": row + 1,
+                "startColumnIndex": column,
+                "endColumnIndex": column + 1,
+            }
+        else:
+            grid_range = {
+                "sheetId": sheet_id,
+                "startRowIndex": 0,
+                "endRowIndex": DEFAULT_SCAN_ROWS,
+                "startColumnIndex": 0,
+                "endColumnIndex": DEFAULT_SCAN_COLUMNS,
+            }
+
+        try:
+            response = (
+                self._api.spreadsheets()
+                .getByDataFilter(
+                    spreadsheetId=self._config.spreadsheet_id,
+                    body={"dataFilters": [{"gridRange": grid_range}], "includeGridData": True},
+                    fields=(
+                        "sheets(properties.sheetId,data(rowData(values("
+                        "effectiveValue,formattedValue,effectiveFormat.numberFormat))))"
+                    ),
+                )
+                .execute()
+            )
+        except (HttpError, RequestException) as exc:
+            logger.warning(
+                "Could not read the date from worksheet ID %s (%s); falling back to today's date",
+                sheet_id,
+                exc,
+            )
+            return None
+
+        default_year = datetime.now(self._config.timezone).year
+        for sheet in response.get("sheets", []):
+            if sheet.get("properties", {}).get("sheetId") != sheet_id:
+                continue
+            for grid in sheet.get("data", []):
+                found = find_date_in_grid(grid.get("rowData", []), default_year)
+                if found:
+                    logger.info("Worksheet ID %s report date: %s", sheet_id, found.isoformat())
+                    return found
+
+        logger.warning(
+            "No date found in worksheet ID %s (%s); falling back to today's date",
+            sheet_id,
+            f"cell {date_cell}" if date_cell else f"scanned A1:{_column_letter(DEFAULT_SCAN_COLUMNS)}{DEFAULT_SCAN_ROWS}",
+        )
+        return None
+
     def export_worksheet_pdf(self, sheet_id: int) -> bytes:
         """Export a single worksheet (by sheetId/gid) to PDF bytes."""
         logger.info("Exporting worksheet ID %s", sheet_id)
@@ -165,3 +238,12 @@ class SheetsService:
 
         logger.info("PDF export succeeded for worksheet ID %s (%d bytes)", sheet_id, len(response.content))
         return response.content
+
+
+def _column_letter(count: int) -> str:
+    """1 -> A, 26 -> Z, 27 -> AA (for log messages only)."""
+    letters = ""
+    while count > 0:
+        count, remainder = divmod(count - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters

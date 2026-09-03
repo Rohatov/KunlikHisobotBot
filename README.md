@@ -18,7 +18,11 @@ Every day at a configured time (default `12:00 Asia/Tashkent`), the bot:
    export, preserving fonts, borders, colors, merged cells, column widths
    and row heights. Files are named `savdo_<date>.pdf` and
    `qoldiq_<date>.pdf` (e.g. `savdo_2026-08-30.pdf`), sent as plain
-   documents with no caption text underneath.
+   documents with no caption text underneath. `<date>` is the report
+   date written **inside** the worksheet (read from a configured cell or
+   auto-detected), not the day the bot runs — so a report for 1 September
+   that is sent on 3 September is still named `savdo_2026-09-01.pdf`.
+   Today's date is used only if no date can be found in the worksheet.
 4. Sends both PDFs as separate Telegram documents to the configured chat.
 
 An authorized administrator can trigger the exact same flow on demand with
@@ -38,7 +42,8 @@ ID (negative number, e.g. `-1001234567890` for a supergroup) in
 - No OAuth flow, no browser, no interactive login required at runtime.
 - Worksheets identified by immutable `sheetId`, resilient to renames.
 - Two worksheets exported and sent as **separate** PDFs (`savdo_<date>.pdf`,
-  `qoldiq_<date>.pdf`), no caption text.
+  `qoldiq_<date>.pdf`), no caption text. The date comes from the
+  worksheet itself, so the filename always matches the report's date.
 - Delivery to a Telegram channel or group as documents (not photos).
 - Daily scheduler (APScheduler) with configurable time and timezone.
 - Admin-only manual trigger — both a button and the `/report` command.
@@ -113,6 +118,10 @@ GOOGLE_SERVICE_ACCOUNT_FILE=/home/USERNAME/.config/telegram-sheets-bot/service-a
 WORKSHEET_1_ID=123456789
 WORKSHEET_2_ID=987654321
 
+# Optional: cell holding each worksheet's report date (empty = auto-detect)
+WORKSHEET_1_DATE_CELL=
+WORKSHEET_2_DATE_CELL=
+
 # Scheduler
 TIMEZONE=Asia/Tashkent
 SCHEDULE_HOUR=12
@@ -122,6 +131,20 @@ SCHEDULE_MINUTE=0
 **Finding a worksheet's `sheetId`:** open the spreadsheet in a browser,
 click the tab you want, and read the `gid=<number>` value from the URL —
 that number is the `sheetId`.
+
+**Report date in the filename (`WORKSHEET_N_DATE_CELL`):** the `<date>` in
+`savdo_<date>.pdf` / `qoldiq_<date>.pdf` is read from the worksheet, not
+from the clock, because reports are often sent a day or two after their
+business date. Set `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` to the
+A1 reference of the cell that holds the date (e.g. `B2`) for a fully
+deterministic result. If left empty, the bot scans the top-left `A1:Z40`
+block of the worksheet row by row and uses the first cell that is either
+a real date value (a cell Sheets formats as a date, including formulas
+like `=TODAY()-1`) or text containing a date such as `01.09.2026`,
+`2026-09-01`, `1-sentyabr`, `2 сентября 2026` or `Sep 1, 2026`. Numeric
+dates are read day-first (`dd.mm.yyyy`); a missing year means the current
+year. If no date is found (logged as a warning), today's date is used so
+the report is still delivered.
 
 **Finding your Telegram IDs:** message
 [@userinfobot](https://t.me/userinfobot) for your own `ADMIN_TELEGRAM_ID`;
@@ -212,7 +235,15 @@ needs to click it:
    - `TELEGRAM_CHAT_ID` — same value as `.env`'s `TELEGRAM_CHANNEL_ID`
    - `WORKSHEET_1_ID` — same value as `.env`'s `WORKSHEET_1_ID`
    - `WORKSHEET_2_ID` — same value as `.env`'s `WORKSHEET_2_ID`
+   - `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` — *optional*, same
+     meaning as in `.env` (cell holding the report date, e.g. `B2`; omit
+     to auto-detect). The script names the PDFs by the date inside the
+     worksheet exactly like the bot does.
 4. Save (Ctrl+S).
+5. Optional check: select `debugReportDates` in the function dropdown,
+   click **Run**, and open **Executions** — it logs which date (and thus
+   which filename) will be used for each worksheet without sending
+   anything to Telegram.
 
 ### Option A — Web App link (works for Viewers too, recommended)
 
@@ -298,6 +329,17 @@ needs to be a member allowed to send messages/files — admin rights are
 not required), and that `TELEGRAM_CHANNEL_ID` is the numeric chat ID
 (usually starts with `-100` for channels/supergroups), not an `@username`.
 
+**PDF filename shows the wrong date (e.g. the send date instead of the
+report's date)**
+The date is read from the worksheet, so either no date-like cell was
+found in `A1:Z40` (the log then says `No date found in worksheet ID …;
+falling back to today's date`) or auto-detection picked a different cell
+than you expect (for example a column of transaction dates above the
+header). Set `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` to the exact
+cell that holds the report date and restart the bot. For the Apps Script
+button, set the same keys in Script Properties and run `debugReportDates`
+to see which date each worksheet resolves to.
+
 **Scheduler fires at the wrong time**
 Check `TIMEZONE` is a valid IANA name (e.g. `Asia/Tashkent`) and that
 `SCHEDULE_HOUR`/`SCHEDULE_MINUTE` are in 24-hour, local-to-that-timezone
@@ -339,7 +381,8 @@ telegram-sheets-bot/
 │   ├── config.py          # env loading + validation
 │   ├── bot.py              # Telegram handlers & app wiring
 │   ├── scheduler.py       # APScheduler daily job
-│   ├── sheets_service.py  # Google auth, metadata, PDF export
+│   ├── sheets_service.py  # Google auth, metadata, report date, PDF export
+│   ├── sheet_date.py      # finding/parsing the report date inside a worksheet
 │   ├── pdf_service.py     # temp file naming/cleanup
 │   ├── report_service.py  # shared generate-and-send core + lock
 │   ├── authorization.py   # admin-only guard
@@ -349,6 +392,8 @@ telegram-sheets-bot/
 │   └── telegram-sheets-bot.service
 ├── google-apps-script/
 │   └── Code.gs             # optional in-sheet "Hisobotni yuborish" button
+├── tests/
+│   └── test_sheet_date.py  # offline tests (python -m unittest discover tests)
 ├── logs/
 ├── .env.example
 ├── .gitignore
