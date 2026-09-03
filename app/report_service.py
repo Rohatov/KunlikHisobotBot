@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +32,11 @@ class WorksheetResult:
     pdf_generated: bool = False
     sent: bool = False
     error: Optional[str] = None
+    filename: Optional[str] = None
+    report_date: Optional[date] = None
+    date_from_sheet: bool = False  # True when the filename date came from the worksheet
+    date_cell: Optional[str] = None
+    date_note: str = ""  # why today's date was used instead (empty if it was not)
 
 
 @dataclass
@@ -48,6 +53,7 @@ class LastRunInfo:
     finished_at: datetime
     success: bool
     triggered_by: str
+    worksheet_results: list[WorksheetResult] = field(default_factory=list)
 
 
 class ReportService:
@@ -92,6 +98,7 @@ class ReportService:
             finished_at=result.finished_at,
             success=result.overall_success,
             triggered_by=triggered_by,
+            worksheet_results=list(result.worksheet_results),
         )
 
         logger.info(
@@ -106,13 +113,25 @@ class ReportService:
         pdf_path: Optional[Path] = None
 
         try:
-            pdf_path = await asyncio.to_thread(
+            generated = await asyncio.to_thread(
                 self._pdf_service.generate_worksheet_pdf,
                 worksheet.sheet_id,
                 worksheet.slug,
                 worksheet.date_cell,
             )
+            pdf_path = generated.path
             wr.pdf_generated = True
+            wr.filename = pdf_path.name
+            wr.report_date = generated.report_date
+            wr.date_from_sheet = generated.date_from_sheet
+            wr.date_cell = generated.date_cell
+            wr.date_note = generated.date_note
+            if not generated.date_from_sheet:
+                logger.warning(
+                    "%s: filename uses today's date because the worksheet date could not be read (%s)",
+                    worksheet.label,
+                    generated.date_note,
+                )
         except Exception as exc:  # noqa: BLE001 - convert to safe, logged result
             wr.error = "PDF generation failed"
             logger.error("Failed to export worksheet ID %s: %s", worksheet.sheet_id, exc)

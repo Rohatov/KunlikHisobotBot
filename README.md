@@ -48,10 +48,14 @@ ID (negative number, e.g. `-1001234567890` for a supergroup) in
 - Daily scheduler (APScheduler) with configurable time and timezone.
 - Admin-only manual trigger — both a button and the `/report` command.
   Any number of admins, one `ADMINn_ID` line each in `.env`.
-- `/status` command **and** button showing schedule, last run, and next run.
+- `/status` command **and** button showing schedule, last run, next run,
+  and for each worksheet of the last run the file name that was sent and
+  which cell its date came from.
 - Silent on success (no "sent successfully" chat spam) — the PDFs landing
   in the channel are the confirmation; only failures are messaged to the
-  admin. Check `/status` any time to see the last run's outcome.
+  admin, including the case where a worksheet's date could not be read
+  and today's date had to be used in the file name. Check `/status` any
+  time to see the last run's outcome.
 - Execution lock preventing overlapping report generations.
 - All bot-facing messages in Uzbek.
 - Structured logging to stdout (for `journalctl`) and rotating log files.
@@ -360,10 +364,19 @@ not required), and that `TELEGRAM_CHANNEL_ID` is the numeric chat ID
 
 **PDF filename shows the wrong date (e.g. the send date instead of the
 report's date)**
+First make sure the running bot actually has this version: after a
+`git pull`, restart the service (`sudo systemctl restart
+telegram-sheets-bot`) — a bot process started from older code keeps
+naming files by the send date. With the current version, `/report`
+replies with a `⚠️` message whenever a file had to use today's date, and
+`/status` lists each file of the last run together with the cell its date
+came from (e.g. `savdo_2026-09-01.pdf — yuborildi (sana E4 katagidan)`).
+
 The date is read from a fixed cell of each worksheet (`E4` for Savdo,
 `B1` for Qoldiq unless overridden). If that cell is empty or does not
-contain a date, the log says `No date found in worksheet ID … (cell E4);
-falling back to today's date`. If the sheet layout moved the date to
+contain a date, the log says `No date found in worksheet ID … (cell E4,
+displays '…'); falling back to today's date` and the admin is told the
+reason. If the sheet layout moved the date to
 another cell, click the cell that shows the report date in Sheets, read
 its address from the name box (top-left), and set `WORKSHEET_1_DATE_CELL`
 / `WORKSHEET_2_DATE_CELL` to it in `.env` (restart the bot) and in Script

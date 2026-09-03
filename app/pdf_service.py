@@ -11,7 +11,8 @@ from __future__ import annotations
 import logging
 import os
 import tempfile
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
@@ -19,6 +20,15 @@ from app.config import Config
 from app.sheets_service import SheetsService
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class GeneratedPDF:
+    path: Path
+    report_date: date
+    date_from_sheet: bool  # False when today's date had to be used instead
+    date_cell: Optional[str]  # A1 address the date was read from / expected in
+    date_note: str  # why the sheet date could not be used (empty when it could)
 
 
 class PDFService:
@@ -29,23 +39,27 @@ class PDFService:
 
     def generate_worksheet_pdf(
         self, sheet_id: int, slug: str, date_cell: Optional[str] = None
-    ) -> Path:
+    ) -> GeneratedPDF:
         """Export the given worksheet and write it to a uniquely named PDF.
 
         The filename carries the report date written *inside* the
         worksheet (``<slug>_<YYYY-MM-DD>.pdf``), read from ``date_cell`` or
         auto-detected — not the day the export runs, since a report is
         often sent a day or two after its business date. Today's date is
-        used only when no date can be found in the worksheet.
+        used only when no date can be found in the worksheet, and the
+        returned ``GeneratedPDF`` says so (``date_from_sheet=False`` plus a
+        ``date_note``) so the caller can warn the admin.
 
-        Returns the path to the finished file. Writes go through a
-        randomly-named temp file in the same directory and an atomic
-        rename, so a concurrent reader never sees a partially written PDF.
+        Writes go through a randomly-named temp file in the same directory
+        and an atomic rename, so a concurrent reader never sees a partially
+        written PDF.
         """
         self._tmp_dir.mkdir(parents=True, exist_ok=True)
 
-        report_date = self._sheets_service.get_worksheet_date(sheet_id, date_cell)
-        if report_date is None:
+        lookup = self._sheets_service.lookup_worksheet_date(sheet_id, date_cell)
+        if lookup.value is not None:
+            report_date = lookup.value
+        else:
             report_date = datetime.now(self._config.timezone).date()
         date_str = report_date.strftime("%Y-%m-%d")
         destination = self._tmp_dir / f"{slug}_{date_str}.pdf"
@@ -63,7 +77,13 @@ class PDFService:
             raise
 
         logger.info("PDF generated successfully: %s", destination.name)
-        return destination
+        return GeneratedPDF(
+            path=destination,
+            report_date=report_date,
+            date_from_sheet=lookup.value is not None,
+            date_cell=lookup.cell,
+            date_note=lookup.note,
+        )
 
     def cleanup(self, path: Path) -> None:
         """Best-effort removal of a temporary PDF. Never raises."""

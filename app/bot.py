@@ -11,7 +11,7 @@ from telegram.ext import Application, CallbackQueryHandler, CommandHandler, Cont
 
 from app.authorization import admin_only
 from app.config import Config
-from app.report_service import ReportService
+from app.report_service import ReportResult, ReportService, WorksheetResult
 from app.scheduler import ReportScheduler
 
 logger = logging.getLogger(__name__)
@@ -104,10 +104,33 @@ def _build_status_text(context: ContextTypes.DEFAULT_TYPE) -> str:
             f"🕘 Oxirgi ishga tushish: {last_run.finished_at.strftime('%d.%m.%Y %H:%M %Z')} "
             f"— {outcome} (kim tomonidan: {last_run.triggered_by})"
         )
+        for wr in last_run.worksheet_results:
+            lines.append("   " + _describe_worksheet_result(wr))
     else:
         lines.append("🕘 Oxirgi ishga tushish: hali mavjud emas")
 
     return "\n".join(lines)
+
+
+def _describe_worksheet_result(wr: WorksheetResult) -> str:
+    """One line per worksheet: file name and where its date came from."""
+    if not wr.pdf_generated:
+        return f"❌ {wr.label}: tayyorlanmadi ({wr.error or 'xatolik'})"
+    status = "yuborildi" if wr.sent else "yuborilmadi"
+    if wr.date_from_sheet:
+        source = f"sana {wr.date_cell} katagidan"
+    else:
+        source = f"⚠️ bugungi sana, chunki {wr.date_note or 'varaqdagi sana o\'qilmadi'}"
+    return f"📄 {wr.label}: {wr.filename} — {status} ({source})"
+
+
+def _date_fallback_warnings(result: ReportResult) -> list[str]:
+    return [
+        f"⚠️ {wr.label}: {wr.filename} bugungi sana bilan yuborildi, chunki "
+        f"{wr.date_note or 'varaqdagi sana o\'qilmadi'}."
+        for wr in result.worksheet_results
+        if wr.sent and not wr.date_from_sheet
+    ]
 
 
 @admin_only
@@ -151,6 +174,16 @@ async def _trigger_manual_report(update: Update, context: ContextTypes.DEFAULT_T
                 lines.append(f"❌ {wr.label}: tayyorlashda xatolik")
         await update.effective_message.reply_text(
             "⚠️ Hisobotlarni tayyorlashda muammo yuz berdi.\n\n" + "\n".join(lines)
+        )
+
+    # A report whose filename had to fall back to today's date is a problem
+    # worth telling the admin about, even though delivery itself succeeded.
+    warnings = _date_fallback_warnings(result)
+    if warnings:
+        await update.effective_message.reply_text(
+            "\n".join(warnings)
+            + "\n\nVaraqdagi sana katagini tekshiring (Savdo: E4, Qoldiq: B1 yoki .env dagi "
+            "WORKSHEET_N_DATE_CELL)."
         )
 
 

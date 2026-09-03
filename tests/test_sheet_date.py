@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from app.sheets_service import WorksheetDate  # noqa: E402
 from app.sheet_date import (  # noqa: E402
     cell_address,
     date_from_cell,
@@ -302,12 +303,104 @@ class SheetsServiceDateTests(unittest.TestCase):
         self.assertIsNone(service.get_worksheet_date(111))
 
 
+class SheetsServiceLookupNoteTests(SheetsServiceDateTests):
+    def test_explicit_empty_cell_note(self):
+        service, _ = self._service(_grid_response(111, [{"values": [{}]}]))
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertIsNone(lookup.value)
+        self.assertEqual(lookup.cell, "E4")
+        self.assertEqual(lookup.note, "E4 katagi bo'sh")
+
+    def test_explicit_non_date_cell_note(self):
+        service, _ = self._service(_grid_response(111, [{"values": [_text_cell("Jami")]}]))
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertIsNone(lookup.value)
+        self.assertEqual(lookup.note, "E4 katagidagi 'Jami' sana emas")
+
+    def test_found_cell_note_is_empty(self):
+        service, _ = self._service(_grid_response(111, [{"values": [_date_cell(46266, "01.09.2026")]}]))
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertEqual(lookup.value, date(2026, 9, 1))
+        self.assertEqual((lookup.cell, lookup.display, lookup.note), ("E4", "01.09.2026", ""))
+
+    def test_api_error_note(self):
+        from googleapiclient.errors import HttpError
+
+        resp = MagicMock(status=403, reason="forbidden")
+        service, _ = self._service(side_effect=HttpError(resp, b"{}"))
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertIsNone(lookup.value)
+        self.assertIn("HTTP 403", lookup.note)
+
+
+class ReportServiceEndToEndTests(unittest.TestCase):
+    """/report and the scheduler both go through ReportService: the file
+    handed to Telegram must carry the worksheet's date, not today's."""
+
+    def _run(self, lookups):
+        import asyncio
+        from app.config import WorksheetConfig
+        from app.pdf_service import PDFService
+        from app.report_service import ReportService
+
+        sheets = MagicMock()
+        sheets.lookup_worksheet_date.side_effect = lambda sheet_id, cell: lookups[sheet_id]
+        sheets.export_worksheet_pdf.return_value = b"%PDF-1.4 fake"
+        cfg = _make_config()
+        cfg.telegram_channel_id = -100
+        cfg.worksheets = (
+            WorksheetConfig(sheet_id=111, slug="savdo", label="Savdo", date_cell="E4"),
+            WorksheetConfig(sheet_id=222, slug="qoldiq", label="Qoldiq", date_cell="B1"),
+        )
+        pdf_service = PDFService(sheets, cfg)
+        pdf_service._tmp_dir = Path(tempfile.mkdtemp())
+        service = ReportService(pdf_service, cfg)
+
+        bot = MagicMock()
+        sent = []
+
+        async def send_document(**kwargs):
+            sent.append(kwargs)
+
+        bot.send_document = send_document
+        result = asyncio.run(service.generate_and_send_reports(bot, triggered_by="admin:1"))
+        return result, sent, service
+
+    def test_report_command_sends_files_named_by_sheet_dates(self):
+        result, sent, service = self._run({
+            111: WorksheetDate(date(2026, 9, 1), "E4", "01.09.2026"),
+            222: WorksheetDate(date(2026, 9, 2), "B1", "02.09.2026"),
+        })
+        self.assertTrue(result.overall_success)
+        self.assertEqual([s["filename"] for s in sent], ["savdo_2026-09-01.pdf", "qoldiq_2026-09-02.pdf"])
+        self.assertEqual([s["chat_id"] for s in sent], [-100, -100])
+        self.assertTrue(all(wr.date_from_sheet for wr in result.worksheet_results))
+        self.assertEqual(service.last_run.worksheet_results[0].filename, "savdo_2026-09-01.pdf")
+
+    def test_fallback_is_flagged_but_still_delivered(self):
+        from app.bot import _date_fallback_warnings, _describe_worksheet_result
+
+        result, sent, _ = self._run({
+            111: WorksheetDate(date(2026, 9, 1), "E4", "01.09.2026"),
+            222: WorksheetDate(None, "B1", "", "B1 katagi bo'sh"),
+        })
+        today = datetime.now(ZoneInfo("Asia/Tashkent")).strftime("%Y-%m-%d")
+        self.assertTrue(result.overall_success)
+        self.assertEqual(sent[1]["filename"], f"qoldiq_{today}.pdf")
+        warnings = _date_fallback_warnings(result)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Qoldiq", warnings[0])
+        self.assertIn("B1 katagi bo'sh", warnings[0])
+        self.assertIn("E4 katagidan", _describe_worksheet_result(result.worksheet_results[0]))
+        self.assertIn("bugungi sana", _describe_worksheet_result(result.worksheet_results[1]))
+
+
 class PDFServiceFilenameTests(unittest.TestCase):
-    def _pdf_service(self, sheet_date):
+    def _pdf_service(self, lookup):
         from app.pdf_service import PDFService
 
         sheets = MagicMock()
-        sheets.get_worksheet_date.return_value = sheet_date
+        sheets.lookup_worksheet_date.return_value = lookup
         sheets.export_worksheet_pdf.return_value = b"%PDF-1.4 fake"
         cfg = _make_config()
         service = PDFService(sheets, cfg)
@@ -315,24 +408,29 @@ class PDFServiceFilenameTests(unittest.TestCase):
         return service, sheets
 
     def test_filename_uses_sheet_date_not_today(self):
-        service, sheets = self._pdf_service(date(2026, 9, 1))
-        path = service.generate_worksheet_pdf(111, "savdo", "B2")
+        service, sheets = self._pdf_service(WorksheetDate(date(2026, 9, 1), "E4", "01.09.2026"))
+        generated = service.generate_worksheet_pdf(111, "savdo", "E4")
         try:
-            self.assertEqual(path.name, "savdo_2026-09-01.pdf")
-            self.assertEqual(path.read_bytes(), b"%PDF-1.4 fake")
-            sheets.get_worksheet_date.assert_called_once_with(111, "B2")
+            self.assertEqual(generated.path.name, "savdo_2026-09-01.pdf")
+            self.assertEqual(generated.path.read_bytes(), b"%PDF-1.4 fake")
+            self.assertTrue(generated.date_from_sheet)
+            self.assertEqual(generated.date_cell, "E4")
+            self.assertEqual(generated.date_note, "")
+            sheets.lookup_worksheet_date.assert_called_once_with(111, "E4")
         finally:
-            service.cleanup(path)
+            service.cleanup(generated.path)
 
     def test_filename_falls_back_to_today(self):
-        service, sheets = self._pdf_service(None)
+        service, sheets = self._pdf_service(WorksheetDate(None, "B1", "", "B1 katagi bo'sh"))
         today = datetime.now(ZoneInfo("Asia/Tashkent")).strftime("%Y-%m-%d")
-        path = service.generate_worksheet_pdf(222, "qoldiq")
+        generated = service.generate_worksheet_pdf(222, "qoldiq", "B1")
         try:
-            self.assertEqual(path.name, f"qoldiq_{today}.pdf")
-            sheets.get_worksheet_date.assert_called_once_with(222, None)
+            self.assertEqual(generated.path.name, f"qoldiq_{today}.pdf")
+            self.assertFalse(generated.date_from_sheet)
+            self.assertEqual(generated.date_note, "B1 katagi bo'sh")
+            sheets.lookup_worksheet_date.assert_called_once_with(222, "B1")
         finally:
-            service.cleanup(path)
+            service.cleanup(generated.path)
 
 
 class _ConfigTestBase(unittest.TestCase):

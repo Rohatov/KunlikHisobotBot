@@ -30,6 +30,7 @@ far better than re-building the sheet from raw cell data.
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Iterable, Optional
 
@@ -81,6 +82,21 @@ _EXPORT_PARAMS = {
     "left_margin": "0.50",
     "right_margin": "0.50",
 }
+
+
+@dataclass(frozen=True)
+class WorksheetDate:
+    """Outcome of looking up the report date inside a worksheet.
+
+    ``value`` is None when no date could be read; ``note`` then explains
+    why in a short, admin-readable form (it never contains secrets).
+    ``cell`` is the A1 address the date was read from (or was expected in).
+    """
+
+    value: Optional[date]
+    cell: Optional[str]
+    display: str = ""
+    note: str = ""
 
 
 class SheetsService:
@@ -148,16 +164,21 @@ class SheetsService:
         logger.info("Verified %d configured worksheet(s) exist in the spreadsheet", len(list(sheet_ids)))
 
     def get_worksheet_date(self, sheet_id: int, date_cell: Optional[str] = None) -> Optional[date]:
+        """Shortcut for ``lookup_worksheet_date(...).value``."""
+        return self.lookup_worksheet_date(sheet_id, date_cell).value
+
+    def lookup_worksheet_date(self, sheet_id: int, date_cell: Optional[str] = None) -> WorksheetDate:
         """Read the report date written inside a worksheet.
 
         With ``date_cell`` (A1 notation) only that cell is read; otherwise
         the top-left ``DEFAULT_SCAN_ROWS`` x ``DEFAULT_SCAN_COLUMNS`` block
         is scanned in reading order, skipping hidden rows/columns and
         preferring cells that visibly display a full date (see
-        ``app.sheet_date.find_date_in_grid``). Returns None — never raises
-        — when no date can be determined, so a missing or unreadable date
-        degrades to a fallback filename rather than blocking the report.
+        ``app.sheet_date.find_date_in_grid``). Never raises: when no date
+        can be determined the result carries ``value=None`` and a ``note``
+        saying why, so callers can fall back and tell the admin.
         """
+        scan_label = f"A1:{column_letter(DEFAULT_SCAN_COLUMNS - 1)}{DEFAULT_SCAN_ROWS}"
         if date_cell:
             row, column = parse_a1_cell(date_cell)
             grid_range = {
@@ -191,27 +212,38 @@ class SheetsService:
                 )
                 .execute()
             )
-        except (HttpError, RequestException) as exc:
+        except HttpError as exc:
+            status = exc.resp.status if exc.resp is not None else None
+            logger.warning(
+                "Could not read the date from worksheet ID %s (HTTP %s: %s); falling back to today's date",
+                sheet_id,
+                status,
+                exc,
+            )
+            return WorksheetDate(None, date_cell, note=f"Google Sheets API xatosi (HTTP {status})")
+        except RequestException as exc:
             logger.warning(
                 "Could not read the date from worksheet ID %s (%s); falling back to today's date",
                 sheet_id,
                 exc,
             )
-            return None
+            return WorksheetDate(None, date_cell, note="Google Sheets bilan bog'lanishda tarmoq xatosi")
 
         default_year = datetime.now(self._config.timezone).year
+        display_of_target = ""
         for sheet in response.get("sheets", []):
             if sheet.get("properties", {}).get("sheetId") != sheet_id:
                 continue
             for grid in sheet.get("data", []):
+                row_data = grid.get("rowData", [])
                 # An explicitly configured cell is honoured even if hidden.
                 hidden_rows = () if date_cell else _hidden_indices(grid.get("rowMetadata"))
                 hidden_columns = () if date_cell else _hidden_indices(grid.get("columnMetadata"))
-                found = find_date_in_grid(
-                    grid.get("rowData", []), default_year, hidden_rows, hidden_columns
-                )
+                found = find_date_in_grid(row_data, default_year, hidden_rows, hidden_columns)
                 if found:
-                    address = cell_address(
+                    # For an explicit cell we asked for exactly that cell, so
+                    # its address is known without relying on the grid offset.
+                    address = date_cell or cell_address(
                         grid.get("startRow", 0) + found.row, grid.get("startColumn", 0) + found.column
                     )
                     logger.info(
@@ -222,14 +254,24 @@ class SheetsService:
                         found.display,
                         "" if found.visible else "; date value with partial display",
                     )
-                    return found.value
+                    return WorksheetDate(found.value, address, found.display)
+                if date_cell:
+                    display_of_target = _first_display_value(row_data)
 
+        if date_cell:
+            note = (
+                f"{date_cell} katagi bo'sh"
+                if not display_of_target
+                else f"{date_cell} katagidagi '{display_of_target}' sana emas"
+            )
+        else:
+            note = f"{scan_label} oralig'ida sana topilmadi"
         logger.warning(
             "No date found in worksheet ID %s (%s); falling back to today's date",
             sheet_id,
-            f"cell {date_cell}" if date_cell else f"scanned A1:{column_letter(DEFAULT_SCAN_COLUMNS - 1)}{DEFAULT_SCAN_ROWS}",
+            f"cell {date_cell}, displays '{display_of_target}'" if date_cell else f"scanned {scan_label}",
         )
-        return None
+        return WorksheetDate(None, date_cell, display_of_target, note)
 
     def export_worksheet_pdf(self, sheet_id: int) -> bytes:
         """Export a single worksheet (by sheetId/gid) to PDF bytes."""
@@ -267,3 +309,17 @@ def _hidden_indices(dimension_metadata: Optional[list[dict]]) -> frozenset[int]:
         for index, props in enumerate(dimension_metadata or [])
         if props.get("hiddenByUser") or props.get("hiddenByFilter")
     )
+
+
+def _first_display_value(row_data: list[dict]) -> str:
+    """Displayed text of the first cell in the grid (for diagnostics)."""
+    for row in row_data or []:
+        for cell in row.get("values") or []:
+            formatted = cell.get("formattedValue")
+            if isinstance(formatted, str):
+                return formatted
+            string_value = (cell.get("effectiveValue") or {}).get("stringValue")
+            if isinstance(string_value, str):
+                return string_value
+            return ""
+    return ""
