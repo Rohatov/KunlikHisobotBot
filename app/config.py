@@ -30,9 +30,9 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 class WorksheetConfig:
     """A single worksheet identified by its Google `sheetId` (gid).
 
-    ``date_cell`` is an optional A1 reference (e.g. ``"B2"``) of the cell
-    holding the report's date. When None, the top-left region of the
-    worksheet is scanned for the first date-like cell instead.
+    ``date_cell`` is the A1 reference (e.g. ``"E4"``) of the cell holding
+    the report's date. When None, the top-left region of the worksheet is
+    scanned for the first visible date-like cell instead.
     """
 
     sheet_id: int
@@ -104,18 +104,28 @@ def _validate_service_account_file(raw_path: str) -> Path:
     return path
 
 
-def _optional_date_cell_env(name: str) -> Optional[str]:
-    """Read an optional A1 cell reference; blank means "auto-detect"."""
+# Where each worksheet writes its report date. These are the real cells in
+# the production spreadsheet (Savdo: E4, Qoldiq: B1); override with
+# WORKSHEET_N_DATE_CELL if the layout changes, or set it to "auto" to fall
+# back to scanning the worksheet for the first visible date.
+DEFAULT_WORKSHEET_1_DATE_CELL = "E4"
+DEFAULT_WORKSHEET_2_DATE_CELL = "B1"
+
+
+def _date_cell_env(name: str, default: str) -> Optional[str]:
+    """Read a date-cell setting: A1 reference, blank (= default) or "auto"."""
     raw = os.getenv(name)
     if raw is None or raw.strip() == "":
-        return None
+        return default
     cell = raw.strip().replace("$", "").upper()
+    if cell == "AUTO":
+        return None
     try:
         parse_a1_cell(cell)
     except ValueError as exc:
         raise ConfigError(
             f"Environment variable '{name}' must be a single-cell A1 reference "
-            f"such as 'B2' (or left empty to auto-detect the date), got '{raw}'."
+            f"such as '{default}', or 'auto' to detect the date automatically, got '{raw}'."
         ) from exc
     return cell
 
@@ -159,8 +169,8 @@ def load_config(env_file: str | None = None) -> Config:
         raise ConfigError(
             "WORKSHEET_1_ID and WORKSHEET_2_ID must refer to two different worksheets."
         )
-    worksheet_1_date_cell = _optional_date_cell_env("WORKSHEET_1_DATE_CELL")
-    worksheet_2_date_cell = _optional_date_cell_env("WORKSHEET_2_DATE_CELL")
+    worksheet_1_date_cell = _date_cell_env("WORKSHEET_1_DATE_CELL", DEFAULT_WORKSHEET_1_DATE_CELL)
+    worksheet_2_date_cell = _date_cell_env("WORKSHEET_2_DATE_CELL", DEFAULT_WORKSHEET_2_DATE_CELL)
 
     timezone_name = os.getenv("TIMEZONE", "Asia/Tashkent").strip() or "Asia/Tashkent"
     timezone = _validate_timezone(timezone_name)

@@ -44,6 +44,8 @@ from app.exceptions import PDFExportError, SheetsAccessError, WorksheetNotFoundE
 from app.sheet_date import (
     DEFAULT_SCAN_COLUMNS,
     DEFAULT_SCAN_ROWS,
+    cell_address,
+    column_letter,
     find_date_in_grid,
     parse_a1_cell,
 )
@@ -150,10 +152,11 @@ class SheetsService:
 
         With ``date_cell`` (A1 notation) only that cell is read; otherwise
         the top-left ``DEFAULT_SCAN_ROWS`` x ``DEFAULT_SCAN_COLUMNS`` block
-        is scanned in reading order for the first date-like cell. Returns
-        None — never raises — when no date can be determined, so a missing
-        or unreadable date degrades to a fallback filename rather than
-        blocking the whole report.
+        is scanned in reading order, skipping hidden rows/columns and
+        preferring cells that visibly display a full date (see
+        ``app.sheet_date.find_date_in_grid``). Returns None — never raises
+        — when no date can be determined, so a missing or unreadable date
+        degrades to a fallback filename rather than blocking the report.
         """
         if date_cell:
             row, column = parse_a1_cell(date_cell)
@@ -180,8 +183,10 @@ class SheetsService:
                     spreadsheetId=self._config.spreadsheet_id,
                     body={"dataFilters": [{"gridRange": grid_range}], "includeGridData": True},
                     fields=(
-                        "sheets(properties.sheetId,data(rowData(values("
-                        "effectiveValue,formattedValue,effectiveFormat.numberFormat))))"
+                        "sheets(properties.sheetId,data(startRow,startColumn,"
+                        "rowMetadata(hiddenByUser,hiddenByFilter),"
+                        "columnMetadata(hiddenByUser,hiddenByFilter),"
+                        "rowData(values(effectiveValue,formattedValue,effectiveFormat.numberFormat))))"
                     ),
                 )
                 .execute()
@@ -199,15 +204,30 @@ class SheetsService:
             if sheet.get("properties", {}).get("sheetId") != sheet_id:
                 continue
             for grid in sheet.get("data", []):
-                found = find_date_in_grid(grid.get("rowData", []), default_year)
+                # An explicitly configured cell is honoured even if hidden.
+                hidden_rows = () if date_cell else _hidden_indices(grid.get("rowMetadata"))
+                hidden_columns = () if date_cell else _hidden_indices(grid.get("columnMetadata"))
+                found = find_date_in_grid(
+                    grid.get("rowData", []), default_year, hidden_rows, hidden_columns
+                )
                 if found:
-                    logger.info("Worksheet ID %s report date: %s", sheet_id, found.isoformat())
-                    return found
+                    address = cell_address(
+                        grid.get("startRow", 0) + found.row, grid.get("startColumn", 0) + found.column
+                    )
+                    logger.info(
+                        "Worksheet ID %s report date: %s (cell %s displays '%s'%s)",
+                        sheet_id,
+                        found.value.isoformat(),
+                        address,
+                        found.display,
+                        "" if found.visible else "; date value with partial display",
+                    )
+                    return found.value
 
         logger.warning(
             "No date found in worksheet ID %s (%s); falling back to today's date",
             sheet_id,
-            f"cell {date_cell}" if date_cell else f"scanned A1:{_column_letter(DEFAULT_SCAN_COLUMNS)}{DEFAULT_SCAN_ROWS}",
+            f"cell {date_cell}" if date_cell else f"scanned A1:{column_letter(DEFAULT_SCAN_COLUMNS - 1)}{DEFAULT_SCAN_ROWS}",
         )
         return None
 
@@ -240,10 +260,10 @@ class SheetsService:
         return response.content
 
 
-def _column_letter(count: int) -> str:
-    """1 -> A, 26 -> Z, 27 -> AA (for log messages only)."""
-    letters = ""
-    while count > 0:
-        count, remainder = divmod(count - 1, 26)
-        letters = chr(ord("A") + remainder) + letters
-    return letters
+def _hidden_indices(dimension_metadata: Optional[list[dict]]) -> frozenset[int]:
+    """Indices (relative to the grid) of rows/columns hidden by user or filter."""
+    return frozenset(
+        index
+        for index, props in enumerate(dimension_metadata or [])
+        if props.get("hiddenByUser") or props.get("hiddenByFilter")
+    )

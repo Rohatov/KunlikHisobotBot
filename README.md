@@ -118,9 +118,9 @@ GOOGLE_SERVICE_ACCOUNT_FILE=/home/USERNAME/.config/telegram-sheets-bot/service-a
 WORKSHEET_1_ID=123456789
 WORKSHEET_2_ID=987654321
 
-# Optional: cell holding each worksheet's report date (empty = auto-detect)
-WORKSHEET_1_DATE_CELL=
-WORKSHEET_2_DATE_CELL=
+# Cell holding each worksheet's report date (defaults: E4 / B1; "auto" = scan)
+WORKSHEET_1_DATE_CELL=E4
+WORKSHEET_2_DATE_CELL=B1
 
 # Scheduler
 TIMEZONE=Asia/Tashkent
@@ -135,16 +135,30 @@ that number is the `sheetId`.
 **Report date in the filename (`WORKSHEET_N_DATE_CELL`):** the `<date>` in
 `savdo_<date>.pdf` / `qoldiq_<date>.pdf` is read from the worksheet, not
 from the clock, because reports are often sent a day or two after their
-business date. Set `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` to the
-A1 reference of the cell that holds the date (e.g. `B2`) for a fully
-deterministic result. If left empty, the bot scans the top-left `A1:Z40`
-block of the worksheet row by row and uses the first cell that is either
-a real date value (a cell Sheets formats as a date, including formulas
-like `=TODAY()-1`) or text containing a date such as `01.09.2026`,
-`2026-09-01`, `1-sentyabr`, `2 сентября 2026` or `Sep 1, 2026`. Numeric
-dates are read day-first (`dd.mm.yyyy`); a missing year means the current
-year. If no date is found (logged as a warning), today's date is used so
-the report is still delivered.
+business date. By default the Savdo date is read from cell **`E4`** and
+the Qoldiq date from cell **`B1`** (the cells used in the production
+spreadsheet; leaving the variables empty keeps these defaults). If the
+layout changes, set `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` to
+the new A1 reference. Setting a variable to `auto` makes the bot scan the
+top-left `A1:Z40` block of that worksheet row by row instead, mirroring
+what a reader sees in the PDF:
+
+- hidden rows and columns are skipped (they are not printed);
+- the first cell whose *displayed* text is a full date wins — e.g.
+  `01.09.2026`, `2026-09-01`, `1-sentyabr`, `2 сентября 2026`,
+  `Sep 1, 2026` — whether it is typed text or a real date value;
+- a cell that holds a date value but only shows a fragment of it (a
+  header formatted as `2026` or a month number `8`, typical for
+  `=EOMONTH(...)`-style helper cells) is used only if nothing better is
+  found;
+- when a cell both displays a date and holds a real date value, the value
+  is trusted over the text, so locale displays like `9/1/2026` are safe.
+
+Numeric text dates are read day-first (`dd.mm.yyyy`); a missing year means
+the current year. Each run logs which cell was chosen, e.g.
+`Worksheet ID 123 report date: 2026-09-01 (cell D3 displays '01.09.2026')`.
+If no date is found (logged as a warning), today's date is used so the
+report is still delivered.
 
 **Finding your Telegram IDs:** message
 [@userinfobot](https://t.me/userinfobot) for your own `ADMIN_TELEGRAM_ID`;
@@ -236,9 +250,10 @@ needs to click it:
    - `WORKSHEET_1_ID` — same value as `.env`'s `WORKSHEET_1_ID`
    - `WORKSHEET_2_ID` — same value as `.env`'s `WORKSHEET_2_ID`
    - `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` — *optional*, same
-     meaning as in `.env` (cell holding the report date, e.g. `B2`; omit
-     to auto-detect). The script names the PDFs by the date inside the
-     worksheet exactly like the bot does.
+     meaning as in `.env` (cell holding the report date; defaults `E4` for
+     Savdo and `B1` for Qoldiq when omitted, `auto` to scan). The script
+     names the PDFs by the date inside the worksheet exactly like the bot
+     does.
 4. Save (Ctrl+S).
 5. Optional check: select `debugReportDates` in the function dropdown,
    click **Run**, and open **Executions** — it logs which date (and thus
@@ -331,14 +346,17 @@ not required), and that `TELEGRAM_CHANNEL_ID` is the numeric chat ID
 
 **PDF filename shows the wrong date (e.g. the send date instead of the
 report's date)**
-The date is read from the worksheet, so either no date-like cell was
-found in `A1:Z40` (the log then says `No date found in worksheet ID …;
-falling back to today's date`) or auto-detection picked a different cell
-than you expect (for example a column of transaction dates above the
-header). Set `WORKSHEET_1_DATE_CELL` / `WORKSHEET_2_DATE_CELL` to the exact
-cell that holds the report date and restart the bot. For the Apps Script
-button, set the same keys in Script Properties and run `debugReportDates`
-to see which date each worksheet resolves to.
+The date is read from a fixed cell of each worksheet (`E4` for Savdo,
+`B1` for Qoldiq unless overridden). If that cell is empty or does not
+contain a date, the log says `No date found in worksheet ID … (cell E4);
+falling back to today's date`. If the sheet layout moved the date to
+another cell, click the cell that shows the report date in Sheets, read
+its address from the name box (top-left), and set `WORKSHEET_1_DATE_CELL`
+/ `WORKSHEET_2_DATE_CELL` to it in `.env` (restart the bot) and in Script
+Properties. The bot's log line `Worksheet ID … report date: … (cell E4
+displays '…')` shows exactly which cell and value were used; for the Apps
+Script button, run `debugReportDates` and read the same information in
+**Executions**.
 
 **Scheduler fires at the wrong time**
 Check `TIMEZONE` is a valid IANA name (e.g. `Asia/Tashkent`) and that
@@ -354,6 +372,19 @@ is readable by the user running the service.
 This is the built-in execution lock — a scheduled or another manual run
 is already in progress. Wait for it to finish; the bot will not run two
 report generations concurrently.
+
+**Apps Script: `❌ savdo: Address unavailable: https://api.telegram.org/...`
+(or `DNS error`, `Timeout`) while the other worksheet was sent fine**
+This is a transient network failure inside Google's `UrlFetchApp`, not a
+problem with the bot token, the chat ID or the worksheet — the very next
+request usually succeeds. The script now retries each Telegram/export
+request up to 4 times with a short back-off, and only reports a failure if
+all attempts fail; just press the button again in that case. Older
+versions of the script printed the raw error, which contained the full
+Telegram URL **including the bot token**, on the Web App result page. If
+anyone besides you may have seen such a message, revoke the token in
+[@BotFather](https://t.me/BotFather) (`/revoke`) and update both `.env`
+and the Script Properties with the new one.
 
 **Apps Script says "Sozlamalar to'liq emas" even though the Script
 Properties look correct**

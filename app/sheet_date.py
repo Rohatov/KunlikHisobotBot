@@ -11,8 +11,16 @@ Two lookups are supported:
 
 * an explicit A1 cell configured per worksheet (``WORKSHEET_N_DATE_CELL``),
 * or, when not configured, a scan of the top-left region of the worksheet
-  in reading order (row by row, left to right) for the first cell that is
-  either a real date-formatted value or text that looks like a date.
+  in reading order (row by row, left to right).
+
+The scan mirrors what a reader sees in the exported PDF: hidden rows and
+columns are skipped (they are not printed), and a cell whose *displayed*
+text is a full date (``01.09.2026``, ``1-sentyabr``) wins over a cell
+that merely holds a date value but shows only a fragment of it, such as
+a year (``2026``) or month number (``8``) — those are used only as a
+last resort. When a cell both displays a date and holds a real date
+value, the underlying value is trusted over the text, which keeps
+locale-specific displays like ``9/1/2026`` from being misread.
 
 Only pure parsing lives here; the Sheets API call is in
 ``app.sheets_service``.
@@ -22,8 +30,9 @@ from __future__ import annotations
 
 import math
 import re
+from dataclasses import dataclass
 from datetime import date, timedelta
-from typing import Optional
+from typing import Collection, Optional
 
 # Google Sheets serial day 0 is 30 December 1899.
 _SHEETS_EPOCH = date(1899, 12, 30)
@@ -163,43 +172,99 @@ def parse_date_text(text: str, default_year: int) -> Optional[date]:
     return None
 
 
+@dataclass(frozen=True)
+class FoundDate:
+    """A date located in a worksheet, with where it came from (for logs)."""
+
+    value: date
+    row: int  # zero-based, relative to the scanned grid
+    column: int  # zero-based, relative to the scanned grid
+    display: str
+    visible: bool  # True if the cell's displayed text itself reads as a full date
+
+
+def column_letter(index: int) -> str:
+    """Zero-based column index -> A1 letters (0 -> A, 25 -> Z, 26 -> AA)."""
+    letters = ""
+    index += 1
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        letters = chr(ord("A") + remainder) + letters
+    return letters
+
+
+def cell_address(row: int, column: int) -> str:
+    """Zero-based (row, column) -> A1 address such as ``C2``."""
+    return f"{column_letter(column)}{row + 1}"
+
+
+def _serial_date(cell: dict) -> Optional[date]:
+    """The cell's real date value, if Sheets formats it as a date."""
+    effective_value = cell.get("effectiveValue") or {}
+    number_format = ((cell.get("effectiveFormat") or {}).get("numberFormat") or {})
+    if "numberValue" in effective_value and number_format.get("type") in ("DATE", "DATE_TIME"):
+        return serial_to_date(effective_value["numberValue"])
+    return None
+
+
+def _display_text(cell: dict) -> str:
+    formatted = cell.get("formattedValue")
+    if isinstance(formatted, str):
+        return formatted
+    string_value = (cell.get("effectiveValue") or {}).get("stringValue")
+    return string_value if isinstance(string_value, str) else ""
+
+
+def _text_date(cell: dict, default_year: int) -> Optional[date]:
+    """A date read from what the cell *displays* (or its raw text)."""
+    result = parse_date_text(_display_text(cell), default_year)
+    if result:
+        return result
+    string_value = (cell.get("effectiveValue") or {}).get("stringValue")
+    if isinstance(string_value, str) and string_value != cell.get("formattedValue"):
+        return parse_date_text(string_value, default_year)
+    return None
+
+
 def date_from_cell(cell: dict, default_year: int) -> Optional[date]:
     """Interpret a single ``CellData`` dict from the Sheets API as a date.
 
     A cell counts as a date if it holds a number rendered with a DATE or
     DATE_TIME number format (the normal case for dates typed into Sheets),
-    or if its displayed text parses as a date.
+    or if its displayed text parses as a date. The real value wins when
+    both are present.
     """
     if not cell:
         return None
-
-    effective_value = cell.get("effectiveValue") or {}
-    number_format = ((cell.get("effectiveFormat") or {}).get("numberFormat") or {})
-    format_type = number_format.get("type", "")
-
-    if "numberValue" in effective_value and format_type in ("DATE", "DATE_TIME"):
-        result = serial_to_date(effective_value["numberValue"])
-        if result:
-            return result
-
-    formatted = cell.get("formattedValue")
-    if isinstance(formatted, str):
-        result = parse_date_text(formatted, default_year)
-        if result:
-            return result
-
-    string_value = effective_value.get("stringValue")
-    if isinstance(string_value, str) and string_value != formatted:
-        return parse_date_text(string_value, default_year)
-
-    return None
+    return _serial_date(cell) or _text_date(cell, default_year)
 
 
-def find_date_in_grid(row_data: list[dict], default_year: int) -> Optional[date]:
-    """Scan ``GridData.rowData`` in reading order and return the first date."""
-    for row in row_data or []:
-        for cell in row.get("values") or []:
-            result = date_from_cell(cell, default_year)
-            if result:
-                return result
-    return None
+def find_date_in_grid(
+    row_data: list[dict],
+    default_year: int,
+    hidden_rows: Collection[int] = (),
+    hidden_columns: Collection[int] = (),
+) -> Optional[FoundDate]:
+    """Scan ``GridData.rowData`` in reading order for the report date.
+
+    Returns the first visible cell whose displayed text is a full date;
+    failing that, the first visible date-formatted cell whose display is
+    only a fragment (year, month number, ...); else None. Rows/columns
+    listed in ``hidden_rows``/``hidden_columns`` (zero-based, relative to
+    the grid) are skipped because they do not appear in the PDF.
+    """
+    fallback: Optional[FoundDate] = None
+    for row_index, row in enumerate(row_data or []):
+        if row_index in hidden_rows:
+            continue
+        for column_index, cell in enumerate(row.get("values") or []):
+            if column_index in hidden_columns or not cell:
+                continue
+            text = _text_date(cell, default_year)
+            serial = _serial_date(cell)
+            display = _display_text(cell)
+            if text is not None:
+                return FoundDate(serial or text, row_index, column_index, display, visible=True)
+            if serial is not None and fallback is None:
+                fallback = FoundDate(serial, row_index, column_index, display, visible=False)
+    return fallback

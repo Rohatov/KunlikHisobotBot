@@ -42,7 +42,7 @@ function debugProperties() {
   ['TELEGRAM_BOT_TOKEN', 'TELEGRAM_CHAT_ID', 'WORKSHEET_1_ID', 'WORKSHEET_2_ID', 'WORKSHEET_1_DATE_CELL', 'WORKSHEET_2_DATE_CELL'].forEach(function (key) {
     const value = props[key];
     if (!value && key.indexOf('_DATE_CELL') !== -1) {
-      Logger.log(key + " -> bo'sh (ixtiyoriy: sana avtomatik topiladi)");
+      Logger.log(key + " -> bo'sh (standart katak ishlatiladi: Savdo E4, Qoldiq B1)");
     } else if (!value) {
       Logger.log(key + " -> TOPILMADI (bo'sh yoki kalit nomi noto'g'ri)");
     } else if (key === 'TELEGRAM_BOT_TOKEN') {
@@ -96,6 +96,17 @@ function doGet(e) {
   return HtmlService.createHtmlOutput(html).setTitle('Hisobot');
 }
 
+/** Har bir varaqda hisobot sanasi turgan katak (Python config.py bilan bir xil). */
+const DEFAULT_DATE_CELLS_ = { savdo: 'E4', qoldiq: 'B1' };
+
+/** Script Property qiymati: bo'sh -> standart; "auto" -> null (avtomatik topish). */
+function dateCellSetting_(raw, defaultCell) {
+  const value = raw ? String(raw).trim().replace(/\$/g, '').toUpperCase() : '';
+  if (!value) return defaultCell;
+  if (value === 'AUTO') return null;
+  return value;
+}
+
 /** Ikkala yo'l ham shu umumiy funksiyani chaqiradi — mantiq takrorlanmaydi. */
 function generateAndSendReport_() {
   const lock = LockService.getScriptLock();
@@ -110,10 +121,11 @@ function generateAndSendReport_() {
     const chatId = props.getProperty('TELEGRAM_CHAT_ID');
     const worksheet1Id = props.getProperty('WORKSHEET_1_ID');
     const worksheet2Id = props.getProperty('WORKSHEET_2_ID');
-    // Ixtiyoriy: hisobot sanasi turgan katak (masalan "B2"). Bo'sh bo'lsa,
-    // varaqning yuqori-chap A1:Z40 qismidan birinchi sana avtomatik topiladi.
-    const worksheet1DateCell = props.getProperty('WORKSHEET_1_DATE_CELL');
-    const worksheet2DateCell = props.getProperty('WORKSHEET_2_DATE_CELL');
+    // Hisobot sanasi turgan katak: standart Savdo = E4, Qoldiq = B1.
+    // Script Properties'da WORKSHEET_N_DATE_CELL bilan o'zgartirish mumkin;
+    // "auto" deb yozilsa A1:Z40 dan birinchi ko'rinadigan sana topiladi.
+    const worksheet1DateCell = dateCellSetting_(props.getProperty('WORKSHEET_1_DATE_CELL'), DEFAULT_DATE_CELLS_.savdo);
+    const worksheet2DateCell = dateCellSetting_(props.getProperty('WORKSHEET_2_DATE_CELL'), DEFAULT_DATE_CELLS_.qoldiq);
 
     if (!botToken || !chatId || !worksheet1Id || !worksheet2Id) {
       return {
@@ -145,7 +157,10 @@ function generateAndSendReport_() {
         lines.push('✅ ' + ws.slug + ': muvaffaqiyatli yuborildi');
       } catch (err) {
         allOk = false;
-        lines.push('❌ ' + ws.slug + ': ' + err.message);
+        // Xato matnida Telegram URL (ichida bot token!) bo'lishi mumkin —
+        // bu matn Web App sahifasida hammaga ko'rinadi, shuning uchun token
+        // har doim yashiriladi.
+        lines.push('❌ ' + ws.slug + ': ' + sanitizeError_(err && err.message ? err.message : String(err), botToken));
       }
     }
 
@@ -157,62 +172,109 @@ function generateAndSendReport_() {
 
 /**
  * Varaq ichidagi hisobot sanasini 'yyyy-MM-dd' ko'rinishida qaytaradi.
- * dateCell berilgan bo'lsa faqat o'sha katak o'qiladi; aks holda A1:Z40
- * oralig'i qatorma-qator (chapdan o'ngga) skanerlanib, birinchi sana
- * ko'rinishidagi katak olinadi. Python tomonidagi app/sheet_date.py bilan
- * bir xil qoidalar. Sana topilmasa bugungi kun qaytariladi.
+ * Sana topilmasa bugungi kun qaytariladi. Tafsilot: resolveReportDate_.
  */
 function resolveReportDateString_(spreadsheet, sheetId, dateCell) {
   const tz = spreadsheet.getSpreadsheetTimeZone();
-  const today = new Date();
-  const defaultYear = Number(Utilities.formatDate(today, tz, 'yyyy'));
+  const found = resolveReportDate_(spreadsheet, sheetId, dateCell);
+  if (!found) {
+    Logger.log('Varaq ' + sheetId + ' ichida sana topilmadi, bugungi kun ishlatiladi');
+    return Utilities.formatDate(new Date(), tz, 'yyyy-MM-dd');
+  }
+  Logger.log(
+    'Varaq ' + sheetId + ' sanasi: ' + dateToString_(found.date) + ' (' + found.cell +
+    " katagi: '" + found.display + "'" + (found.visible ? '' : ", sana qiymati, lekin to'liq sana ko'rinmaydi") + ')'
+  );
+  return dateToString_(found.date);
+}
+
+/**
+ * Hisobot sanasini varaqdan topadi: {date:{y,m,d}, cell:'C2', display:'01.09.2026', visible:true}
+ * yoki null.
+ *
+ * dateCell berilgan bo'lsa faqat o'sha katak o'qiladi (yashirin bo'lsa ham).
+ * Aks holda A1:Z40 oralig'i qatorma-qator (chapdan o'ngga) skanerlanadi —
+ * PDF'da ko'rinadigan narsaga mos ravishda:
+ *   - yashirin qator/ustunlar o'tkazib yuboriladi (ular PDF'ga chiqmaydi);
+ *   - ekranda TO'LIQ sana bo'lib ko'rinadigan katak ("01.09.2026",
+ *     "1-sentyabr") birinchi topilganda qaytariladi;
+ *   - sana qiymati bo'lsa-yu, faqat yil ("2026") yoki oy raqami ("8")
+ *     ko'rinsa, bunday katak faqat zaxira variant sifatida ishlatiladi;
+ *   - katakda ham sana qiymati, ham matn bo'lsa, qiymat ishonchli
+ *     hisoblanadi ("9/1/2026" kabi lokal formatlar noto'g'ri o'qilmasin).
+ * Python tomonidagi app/sheet_date.py bilan bir xil qoidalar.
+ */
+function resolveReportDate_(spreadsheet, sheetId, dateCell) {
+  const tz = spreadsheet.getSpreadsheetTimeZone();
+  const defaultYear = Number(Utilities.formatDate(new Date(), tz, 'yyyy'));
 
   const sheet = spreadsheet.getSheets().find(function (s) {
     return String(s.getSheetId()) === String(sheetId);
   });
-  if (!sheet) {
-    return Utilities.formatDate(today, tz, 'yyyy-MM-dd');
+  if (!sheet) return null;
+
+  if (dateCell && String(dateCell).trim()) {
+    const range = sheet.getRange(String(dateCell).trim());
+    const hit = dateFromCellValue_(range.getValue(), range.getDisplayValue(), defaultYear, tz);
+    if (!hit) return null;
+    return { date: hit.date, cell: range.getA1Notation(), display: range.getDisplayValue(), visible: hit.visible };
   }
 
-  let found = null;
-  if (dateCell && String(dateCell).trim()) {
-    found = dateFromCellValue_(sheet.getRange(String(dateCell).trim()).getValue(), defaultYear);
-  } else {
-    const rows = Math.min(40, Math.max(sheet.getLastRow(), 1));
-    const cols = Math.min(26, Math.max(sheet.getLastColumn(), 1));
-    const values = sheet.getRange(1, 1, rows, cols).getValues();
-    outer: for (let r = 0; r < values.length; r++) {
-      for (let c = 0; c < values[r].length; c++) {
-        found = dateFromCellValue_(values[r][c], defaultYear);
-        if (found) break outer;
-      }
+  const rows = Math.min(40, Math.max(sheet.getLastRow(), 1));
+  const cols = Math.min(26, Math.max(sheet.getLastColumn(), 1));
+  const range = sheet.getRange(1, 1, rows, cols);
+  const values = range.getValues();
+  const displays = range.getDisplayValues();
+
+  const hiddenRow = {};
+  const hiddenCol = {};
+  const isHidden = function (r, c) {
+    if (hiddenRow[r] === undefined) {
+      hiddenRow[r] = sheet.isRowHiddenByUser(r + 1) || sheet.isRowHiddenByFilter(r + 1);
+    }
+    if (hiddenRow[r]) return true;
+    if (hiddenCol[c] === undefined) hiddenCol[c] = sheet.isColumnHiddenByUser(c + 1);
+    return hiddenCol[c];
+  };
+
+  let fallback = null;
+  for (let r = 0; r < values.length; r++) {
+    for (let c = 0; c < values[r].length; c++) {
+      const hit = dateFromCellValue_(values[r][c], displays[r][c], defaultYear, tz);
+      if (!hit || isHidden(r, c)) continue;
+      const result = { date: hit.date, cell: sheet.getRange(r + 1, c + 1).getA1Notation(), display: String(displays[r][c]), visible: hit.visible };
+      if (hit.visible) return result;
+      if (!fallback) fallback = result;
     }
   }
-
-  if (!found) {
-    Logger.log('Varaq ' + sheetId + ' ichida sana topilmadi, bugungi kun ishlatiladi');
-    return Utilities.formatDate(today, tz, 'yyyy-MM-dd');
-  }
-  // Katakdan kelgan Date obyekti jadval vaqt mintaqasida; matndan yasalgani
-  // esa "mahalliy" komponentlar bilan yaratilgan — ikkalasi ham shu yerda
-  // sana komponentlaridan to'g'ridan-to'g'ri formatlanadi.
-  return found.y + '-' + pad2_(found.m) + '-' + pad2_(found.d);
+  return fallback;
 }
 
-/** Katak qiymatini {y, m, d} ga aylantiradi; sana bo'lmasa null. */
-function dateFromCellValue_(value, defaultYear) {
+/**
+ * Katak qiymati + ko'rinadigan matnidan {date:{y,m,d}, visible} yasaydi;
+ * sana bo'lmasa null. visible=true — ekrandagi matnning o'zi to'liq sana.
+ */
+function dateFromCellValue_(value, display, defaultYear, tz) {
+  const text = display ? parseDateText_(String(display), defaultYear) : null;
+  let serial = null;
   if (value instanceof Date && !isNaN(value.getTime())) {
-    const tz = SpreadsheetApp.getActiveSpreadsheet().getSpreadsheetTimeZone();
-    return {
+    serial = {
       y: Number(Utilities.formatDate(value, tz, 'yyyy')),
       m: Number(Utilities.formatDate(value, tz, 'M')),
       d: Number(Utilities.formatDate(value, tz, 'd')),
     };
+  } else if (typeof value === 'string' && value.trim() && !text) {
+    // Ko'rinadigan matn parse bo'lmasa, xom matnni ham sinab ko'ramiz.
+    const raw = parseDateText_(value, defaultYear);
+    if (raw) return { date: raw, visible: true };
   }
-  if (typeof value === 'string' && value.trim()) {
-    return parseDateText_(value, defaultYear);
-  }
+  if (text) return { date: serial || text, visible: true };
+  if (serial) return { date: serial, visible: false };
   return null;
+}
+
+function dateToString_(d) {
+  return d.y + '-' + pad2_(d.m) + '-' + pad2_(d.d);
 }
 
 const MONTH_PATTERNS_ = [
@@ -309,11 +371,17 @@ function debugReportDates() {
   const props = PropertiesService.getScriptProperties();
   const spreadsheet = SpreadsheetApp.getActiveSpreadsheet();
   [
-    ['savdo', props.getProperty('WORKSHEET_1_ID'), props.getProperty('WORKSHEET_1_DATE_CELL')],
-    ['qoldiq', props.getProperty('WORKSHEET_2_ID'), props.getProperty('WORKSHEET_2_DATE_CELL')],
+    ['savdo', props.getProperty('WORKSHEET_1_ID'), dateCellSetting_(props.getProperty('WORKSHEET_1_DATE_CELL'), DEFAULT_DATE_CELLS_.savdo)],
+    ['qoldiq', props.getProperty('WORKSHEET_2_ID'), dateCellSetting_(props.getProperty('WORKSHEET_2_DATE_CELL'), DEFAULT_DATE_CELLS_.qoldiq)],
   ].forEach(function (row) {
-    const dateStr = resolveReportDateString_(spreadsheet, row[1], row[2]);
-    Logger.log(row[0] + ' (sheetId=' + row[1] + ', katak=' + (row[2] || 'avto') + ') -> ' + row[0] + '_' + dateStr + '.pdf');
+    const found = resolveReportDate_(spreadsheet, row[1], row[2]);
+    const dateStr = found ? dateToString_(found.date) : Utilities.formatDate(new Date(), spreadsheet.getSpreadsheetTimeZone(), 'yyyy-MM-dd');
+    Logger.log(
+      row[0] + ' (sheetId=' + row[1] + ', katak=' + (row[2] || 'avto') + ') -> ' + row[0] + '_' + dateStr + '.pdf' +
+      (found
+        ? "  [" + found.cell + " katagi: '" + found.display + "'" + (found.visible ? '' : ", to'liq sana ko'rinmaydi") + ']'
+        : '  [sana topilmadi, bugungi kun]')
+    );
   });
 }
 
@@ -339,10 +407,14 @@ function exportSheetToPdf_(spreadsheetId, sheetId, slug, dateStr) {
     .join('&');
   const url = 'https://docs.google.com/spreadsheets/d/' + spreadsheetId + '/export?' + query;
 
-  const response = UrlFetchApp.fetch(url, {
-    headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
-    muteHttpExceptions: true,
-  });
+  const response = fetchWithRetry_(
+    url,
+    {
+      headers: { Authorization: 'Bearer ' + ScriptApp.getOAuthToken() },
+      muteHttpExceptions: true,
+    },
+    'PDF eksport (' + slug + ')'
+  );
 
   if (response.getResponseCode() !== 200) {
     throw new Error('PDF eksport qilinmadi (HTTP ' + response.getResponseCode() + ')');
@@ -351,17 +423,68 @@ function exportSheetToPdf_(spreadsheetId, sheetId, slug, dateStr) {
   return response.getBlob().setName(slug + '_' + dateStr + '.pdf');
 }
 
+// UrlFetchApp ba'zan tarmoq darajasida vaqtincha xato beradi
+// ("Address unavailable", "DNS error", "Timeout") — bu Google tomonidagi
+// o'tkinchi holat va odatda bir necha soniyadan keyin o'z-o'zidan o'tib
+// ketadi. Shuning uchun har bir so'rov o'sha xatolarda va 429/5xx
+// javoblarda bir necha marta qayta uriniladi.
+const FETCH_ATTEMPTS_ = 4;
+const FETCH_RETRY_BASE_MS_ = 1500;
+
+function fetchWithRetry_(url, options, label) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= FETCH_ATTEMPTS_; attempt++) {
+    try {
+      const response = UrlFetchApp.fetch(url, options);
+      const code = response.getResponseCode();
+      if (code === 429 || code >= 500) {
+        lastError = new Error(label + ': HTTP ' + code);
+      } else {
+        return response;
+      }
+    } catch (err) {
+      lastError = err;
+    }
+    Logger.log(
+      label + ": urinish " + attempt + '/' + FETCH_ATTEMPTS_ + ' muvaffaqiyatsiz: ' +
+      sanitizeError_(lastError.message, null)
+    );
+    if (attempt < FETCH_ATTEMPTS_) {
+      Utilities.sleep(FETCH_RETRY_BASE_MS_ * attempt);
+    }
+  }
+  throw lastError;
+}
+
+/** Xato matnidan bot tokenini olib tashlaydi (hech qachon ko'rsatilmasin). */
+function sanitizeError_(message, botToken) {
+  let text = String(message == null ? '' : message);
+  if (botToken) {
+    text = text.split(botToken).join('***');
+  }
+  // Har ehtimolga qarshi: URL ichidagi /bot<token>/ qismini ham yashirish.
+  text = text.replace(/\/bot[0-9]+:[A-Za-z0-9_-]+/g, '/bot***');
+  if (/Address unavailable|DNS error|Timeout|timed out|Connection reset|Bad request: http/i.test(text)) {
+    text += " (Google tomonidagi vaqtinchalik tarmoq xatosi — qayta urinib ko'ring)";
+  }
+  return text;
+}
+
 /** Tayyor PDF blobni Telegramga hujjat sifatida (captionsiz) yuboradi. */
 function sendDocumentToTelegram_(botToken, chatId, pdfBlob) {
   const url = 'https://api.telegram.org/bot' + botToken + '/sendDocument';
-  const response = UrlFetchApp.fetch(url, {
-    method: 'post',
-    payload: {
-      chat_id: chatId,
-      document: pdfBlob,
+  const response = fetchWithRetry_(
+    url,
+    {
+      method: 'post',
+      payload: {
+        chat_id: chatId,
+        document: pdfBlob,
+      },
+      muteHttpExceptions: true,
     },
-    muteHttpExceptions: true,
-  });
+    'Telegram sendDocument'
+  );
 
   const result = JSON.parse(response.getContentText());
   if (!result.ok) {
