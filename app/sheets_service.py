@@ -3,8 +3,13 @@
 Design notes
 ------------
 Reading spreadsheet metadata (to verify the configured ``sheetId``
-values actually exist) uses the official Sheets API v4
-(``spreadsheets.get``) via ``google-api-python-client``.
+values actually exist) and reading the report-date cells both use the
+official Sheets API v4 ``spreadsheets.get`` via ``google-api-python-client``.
+Date cells are addressed with an A1 range built from the worksheet *title*
+(``'Savdo'!E4``) rather than ``spreadsheets.getByDataFilter`` (which takes a
+``sheetId`` directly): ``getByDataFilter`` is only authorised for the full
+``spreadsheets`` / ``drive`` scopes and answers HTTP 403 to the read-only
+scopes this bot deliberately runs with.
 
 There is, however, no official Google API method that exports a single
 worksheet of a spreadsheet to PDF while preserving native Sheets
@@ -64,6 +69,14 @@ SCOPES = [
 
 _EXPORT_URL_TEMPLATE = "https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export"
 
+# Field mask for date-cell reads: only what ``find_date_in_grid`` needs.
+_GRID_FIELDS = (
+    "sheets(properties.sheetId,data(startRow,startColumn,"
+    "rowMetadata(hiddenByUser,hiddenByFilter),"
+    "columnMetadata(hiddenByUser,hiddenByFilter),"
+    "rowData(values(effectiveValue,formattedValue,effectiveFormat.numberFormat))))"
+)
+
 # Layout parameters for the export request. These mirror Google Sheets'
 # own "Download as PDF" dialog defaults, tuned to keep the sheet's native
 # look (gridlines, colors, merges) rather than a stripped-down printout.
@@ -120,11 +133,13 @@ class SheetsService:
 
         self._session = AuthorizedSession(self._credentials)
         self._api = build_service("sheets", "v4", credentials=self._credentials, cache_discovery=False)
+        # sheetId -> title, filled from spreadsheet metadata; A1 ranges need titles.
+        self._sheet_titles: dict[int, str] = {}
 
     def get_spreadsheet_metadata(self) -> dict:
         """Fetch spreadsheet title and per-sheet properties (id, gid, ...)."""
         try:
-            return (
+            metadata = (
                 self._api.spreadsheets()
                 .get(
                     spreadsheetId=self._config.spreadsheet_id,
@@ -147,6 +162,25 @@ class SheetsService:
             raise SheetsAccessError(f"Google Sheets API error (HTTP {status}).") from exc
         except RequestException as exc:
             raise SheetsAccessError(f"Network error while contacting Google Sheets API: {exc}") from exc
+
+        self._sheet_titles = {
+            props["sheetId"]: props["title"]
+            for sheet in metadata.get("sheets", [])
+            for props in [sheet.get("properties") or {}]
+            if "sheetId" in props and "title" in props
+        }
+        return metadata
+
+    def _sheet_title(self, sheet_id: int, refresh: bool = False) -> str:
+        """Title of the worksheet with ``sheet_id`` (A1 ranges need it)."""
+        if refresh or sheet_id not in self._sheet_titles:
+            self.get_spreadsheet_metadata()
+        try:
+            return self._sheet_titles[sheet_id]
+        except KeyError:
+            raise WorksheetNotFoundError(
+                f"Worksheet ID {sheet_id} was not found in the spreadsheet"
+            ) from None
 
     def verify_worksheets_exist(self, sheet_ids: Iterable[int]) -> None:
         """Raise WorksheetNotFoundError if any configured sheetId is missing."""
@@ -180,38 +214,11 @@ class SheetsService:
         """
         scan_label = f"A1:{column_letter(DEFAULT_SCAN_COLUMNS - 1)}{DEFAULT_SCAN_ROWS}"
         if date_cell:
-            row, column = parse_a1_cell(date_cell)
-            grid_range = {
-                "sheetId": sheet_id,
-                "startRowIndex": row,
-                "endRowIndex": row + 1,
-                "startColumnIndex": column,
-                "endColumnIndex": column + 1,
-            }
-        else:
-            grid_range = {
-                "sheetId": sheet_id,
-                "startRowIndex": 0,
-                "endRowIndex": DEFAULT_SCAN_ROWS,
-                "startColumnIndex": 0,
-                "endColumnIndex": DEFAULT_SCAN_COLUMNS,
-            }
+            parse_a1_cell(date_cell)  # reject anything that is not a single cell
+        cells = date_cell or scan_label
 
         try:
-            response = (
-                self._api.spreadsheets()
-                .getByDataFilter(
-                    spreadsheetId=self._config.spreadsheet_id,
-                    body={"dataFilters": [{"gridRange": grid_range}], "includeGridData": True},
-                    fields=(
-                        "sheets(properties.sheetId,data(startRow,startColumn,"
-                        "rowMetadata(hiddenByUser,hiddenByFilter),"
-                        "columnMetadata(hiddenByUser,hiddenByFilter),"
-                        "rowData(values(effectiveValue,formattedValue,effectiveFormat.numberFormat))))"
-                    ),
-                )
-                .execute()
-            )
+            response = self._fetch_grid(sheet_id, cells)
         except HttpError as exc:
             status = exc.resp.status if exc.resp is not None else None
             logger.warning(
@@ -221,6 +228,16 @@ class SheetsService:
                 exc,
             )
             return WorksheetDate(None, date_cell, note=f"Google Sheets API xatosi (HTTP {status})")
+        except WorksheetNotFoundError as exc:
+            logger.warning("%s; falling back to today's date", exc)
+            return WorksheetDate(None, date_cell, note=f"sheetId {sheet_id} varaq topilmadi")
+        except SheetsAccessError as exc:
+            logger.warning(
+                "Could not resolve the title of worksheet ID %s (%s); falling back to today's date",
+                sheet_id,
+                exc,
+            )
+            return WorksheetDate(None, date_cell, note="Google Sheets API xatosi (varaq nomi olinmadi)")
         except RequestException as exc:
             logger.warning(
                 "Could not read the date from worksheet ID %s (%s); falling back to today's date",
@@ -273,6 +290,39 @@ class SheetsService:
         )
         return WorksheetDate(None, date_cell, display_of_target, note)
 
+    def _fetch_grid(self, sheet_id: int, cells: str) -> dict:
+        """Read ``cells`` (A1 notation, no sheet prefix) of one worksheet.
+
+        The worksheet is addressed by title, taken from cached metadata.
+        HTTP 400 ("Unable to parse range") most likely means the tab was
+        renamed since the titles were cached, so they are refreshed once
+        and the request retried before giving up.
+        """
+        title = self._sheet_title(sheet_id)
+        try:
+            return self._get_grid(title, cells)
+        except HttpError as exc:
+            status = exc.resp.status if exc.resp is not None else None
+            if status != 400:
+                raise
+            refreshed = self._sheet_title(sheet_id, refresh=True)
+            if refreshed == title:
+                raise
+            logger.info("Worksheet ID %s was renamed to '%s'; retrying", sheet_id, refreshed)
+            return self._get_grid(refreshed, cells)
+
+    def _get_grid(self, sheet_title: str, cells: str) -> dict:
+        return (
+            self._api.spreadsheets()
+            .get(
+                spreadsheetId=self._config.spreadsheet_id,
+                ranges=[_a1_range(sheet_title, cells)],
+                includeGridData=True,
+                fields=_GRID_FIELDS,
+            )
+            .execute()
+        )
+
     def export_worksheet_pdf(self, sheet_id: int) -> bytes:
         """Export a single worksheet (by sheetId/gid) to PDF bytes."""
         logger.info("Exporting worksheet ID %s", sheet_id)
@@ -300,6 +350,16 @@ class SheetsService:
 
         logger.info("PDF export succeeded for worksheet ID %s (%d bytes)", sheet_id, len(response.content))
         return response.content
+
+
+def _a1_range(sheet_title: str, cells: str) -> str:
+    """A1 range scoped to a worksheet, e.g. ``'Savdo 2026'!E4``.
+
+    The title is always quoted (spaces, dashes, digits-only names would
+    otherwise break parsing); a literal quote inside it is doubled.
+    """
+    escaped = sheet_title.replace("'", "''")
+    return f"'{escaped}'!{cells}"
 
 
 def _hidden_indices(dimension_metadata: Optional[list[dict]]) -> frozenset[int]:

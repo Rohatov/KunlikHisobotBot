@@ -215,14 +215,31 @@ def _grid_response(sheet_id, row_data):
     return {"sheets": [{"properties": {"sheetId": sheet_id}, "data": [{"rowData": row_data}]}]}
 
 
+def _metadata_response(titles):
+    return {"sheets": [{"properties": {"sheetId": sid, "title": title}} for sid, title in titles.items()]}
+
+
+def _http_error(status):
+    from googleapiclient.errors import HttpError
+
+    return HttpError(MagicMock(status=status, reason="boom"), b"{}")
+
+
 class SheetsServiceDateTests(unittest.TestCase):
-    def _service(self, response=None, side_effect=None):
+    """Date cells are read with ``spreadsheets.get`` + an A1 range built from
+    the worksheet title. ``getByDataFilter`` (sheetId-addressed) must NOT be
+    used: it rejects the read-only scopes with HTTP 403."""
+
+    TITLES = {111: "Savdo", 222: "Qoldiq"}
+
+    def _service(self, response=None, side_effect=None, titles=TITLES):
         from app.sheets_service import SheetsService
 
         service = SheetsService.__new__(SheetsService)
         service._config = _make_config()
+        service._sheet_titles = dict(titles)
         api = MagicMock()
-        execute = api.spreadsheets.return_value.getByDataFilter.return_value.execute
+        execute = api.spreadsheets.return_value.get.return_value.execute
         if side_effect is not None:
             execute.side_effect = side_effect
         else:
@@ -230,16 +247,19 @@ class SheetsServiceDateTests(unittest.TestCase):
         service._api = api
         return service, api
 
+    @staticmethod
+    def _get_calls(api):
+        return api.spreadsheets.return_value.get.call_args_list
+
     def test_auto_detect_uses_scan_range(self):
         row_data = [{"values": [{"formattedValue": "Sana: 02.09.2026"}]}]
         service, api = self._service(_grid_response(111, row_data))
         self.assertEqual(service.get_worksheet_date(111), date(2026, 9, 2))
-        body = api.spreadsheets.return_value.getByDataFilter.call_args.kwargs["body"]
-        self.assertEqual(body["dataFilters"][0]["gridRange"], {
-            "sheetId": 111, "startRowIndex": 0, "endRowIndex": 40,
-            "startColumnIndex": 0, "endColumnIndex": 26,
-        })
-        self.assertTrue(body["includeGridData"])
+        kwargs = self._get_calls(api)[-1].kwargs
+        self.assertEqual(kwargs["ranges"], ["'Savdo'!A1:Z40"])
+        self.assertTrue(kwargs["includeGridData"])
+        self.assertIn("rowData", kwargs["fields"])
+        api.spreadsheets.return_value.getByDataFilter.assert_not_called()
 
     def test_explicit_cell_requests_single_cell(self):
         row_data = [{"values": [{
@@ -249,11 +269,56 @@ class SheetsServiceDateTests(unittest.TestCase):
         }]}]
         service, api = self._service(_grid_response(222, row_data))
         self.assertEqual(service.get_worksheet_date(222, "C3"), date(2026, 9, 1))
-        body = api.spreadsheets.return_value.getByDataFilter.call_args.kwargs["body"]
-        self.assertEqual(body["dataFilters"][0]["gridRange"], {
-            "sheetId": 222, "startRowIndex": 2, "endRowIndex": 3,
-            "startColumnIndex": 2, "endColumnIndex": 3,
-        })
+        self.assertEqual(self._get_calls(api)[-1].kwargs["ranges"], ["'Qoldiq'!C3"])
+        api.spreadsheets.return_value.getByDataFilter.assert_not_called()
+
+    def test_title_with_quote_is_escaped(self):
+        service, api = self._service(_grid_response(111, [{"values": [_date_cell(46266, "01.09.2026")]}]),
+                                     titles={111: "Savdo 'sentyabr'"})
+        self.assertEqual(service.get_worksheet_date(111, "E4"), date(2026, 9, 1))
+        self.assertEqual(self._get_calls(api)[-1].kwargs["ranges"], ["'Savdo ''sentyabr'''!E4"])
+
+    def test_unknown_title_is_fetched_from_metadata(self):
+        grid = _grid_response(111, [{"values": [_date_cell(46266, "01.09.2026")]}])
+        service, api = self._service(side_effect=[_metadata_response({111: "Savdo 2026"}), grid], titles={})
+        self.assertEqual(service.get_worksheet_date(111, "E4"), date(2026, 9, 1))
+        calls = self._get_calls(api)
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn("ranges", calls[0].kwargs)  # metadata call
+        self.assertEqual(calls[1].kwargs["ranges"], ["'Savdo 2026'!E4"])
+        self.assertEqual(service._sheet_titles, {111: "Savdo 2026"})
+
+    def test_renamed_sheet_refreshes_title_and_retries_once(self):
+        grid = _grid_response(111, [{"values": [_date_cell(46266, "01.09.2026")]}])
+        service, api = self._service(
+            side_effect=[_http_error(400), _metadata_response({111: "Yangi nom"}), grid],
+            titles={111: "Eski nom"},
+        )
+        self.assertEqual(service.get_worksheet_date(111, "E4"), date(2026, 9, 1))
+        calls = self._get_calls(api)
+        self.assertEqual(calls[0].kwargs["ranges"], ["'Eski nom'!E4"])
+        self.assertEqual(calls[2].kwargs["ranges"], ["'Yangi nom'!E4"])
+
+    def test_bad_request_with_unchanged_title_is_not_retried_forever(self):
+        service, api = self._service(
+            side_effect=[_http_error(400), _metadata_response({111: "Savdo"}), _http_error(400)],
+        )
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertIsNone(lookup.value)
+        self.assertIn("HTTP 400", lookup.note)
+        self.assertEqual(len(self._get_calls(api)), 2)  # no second grid request
+
+    def test_missing_sheet_id_note(self):
+        service, _ = self._service(side_effect=[_metadata_response({999: "Boshqa"})], titles={})
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertIsNone(lookup.value)
+        self.assertEqual(lookup.note, "sheetId 111 varaq topilmadi")
+
+    def test_metadata_access_error_note(self):
+        service, _ = self._service(side_effect=[_http_error(403)], titles={})
+        lookup = service.lookup_worksheet_date(111, "E4")
+        self.assertIsNone(lookup.value)
+        self.assertEqual(lookup.note, "Google Sheets API xatosi (varaq nomi olinmadi)")
 
     def test_hidden_rows_from_metadata_are_skipped_and_cell_logged(self):
         response = {"sheets": [{"properties": {"sheetId": 111}, "data": [{

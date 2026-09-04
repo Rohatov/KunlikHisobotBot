@@ -385,6 +385,21 @@ displays '…')` shows exactly which cell and value were used; for the Apps
 Script button, run `debugReportDates` and read the same information in
 **Executions**.
 
+**`/report` warns `… bugungi sana bilan yuborildi, chunki Google Sheets API
+xatosi (HTTP 403)` although the PDFs themselves arrive**
+The PDFs and the startup check use endpoints that accept the bot's
+read-only scopes, so a 403 that hits *only* the date read means the date
+lookup is using a Sheets API method those scopes are not allowed to call.
+Versions before 2026-09-04 read the cell with `spreadsheets.getByDataFilter`,
+which Google authorises only for the full `spreadsheets`/`drive` scopes;
+the current version reads it with `spreadsheets.get` and an A1 range built
+from the tab's name (`'Savdo'!E4`), which works with `spreadsheets.readonly`.
+`git pull` and restart the service. If the warning persists on the current
+version, the log line `Could not read the date from worksheet ID … (HTTP
+403: …)` carries Google's reason: usually the Sheets API is disabled in the
+Service Account's Cloud project (section 4, step 2) or the spreadsheet is
+no longer shared with the Service Account.
+
 **Scheduler fires at the wrong time**
 Check `TIMEZONE` is a valid IANA name (e.g. `Asia/Tashkent`) and that
 `SCHEDULE_HOUR`/`SCHEDULE_MINUTE` are in 24-hour, local-to-that-timezone
